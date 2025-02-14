@@ -7,7 +7,8 @@ This repository contains an implementation of a new, Ising prior type regulariza
 **1. Regularization via Ising prior**
 
 <p align="center">
-  <img src="./pic/LBRT.png" height="200" alt="Model Architecture" />
+  <img src="./pic/LBRT.png" height="600" alt="Model Architecture" />
+  <br>
   <b>Figure 1.</b> Model Architecture highlighting the two-stage attention process and the layer-to-layer backpropagation of the Ising prior-based dropout masks. The masks are learned from the likelihood only in the last layer, then they are backpropagated to earlier layers as per the strength of the inter-layer connectivity.
 </p>
 
