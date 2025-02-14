@@ -5,22 +5,27 @@ This repository contains an implementation of a new, Ising prior type regulariza
 ## Key Points of implementation
 
 **1. Regularization via Ising prior**
+
 <p align="center">
-<img src=".\pic\LBRT.PNG" height = "200" alt="" align=center />
-<b>Figure 1.</b> Model Architecture highlighting the two-stage attention process and the layer-to-layer backpropagation of the Ising prior-based dropout masks. The masks are learned from the likelihood only in the last layer, then they are backpropagated to earlier layers as per the strength of the inter-layer connectivity.
+  <img src="./pic/LBRT.PNG" height="200" alt="Model Architecture" />
+  <b>Figure 1.</b> Model Architecture highlighting the two-stage attention process and the layer-to-layer backpropagation of the Ising prior-based dropout masks. The masks are learned from the likelihood only in the last layer, then they are backpropagated to earlier layers as per the strength of the inter-layer connectivity.
 </p>
 
 **2. Regularization via niching**
+
 NYI
 
 ## Requirements
-Package                   Version
-------------------------- --------------
-Python                    3.9.10
-einops                    0.8.0
-numpy                     1.26.3
-pandas                    2.2.2
-torch                     1.8.1
+
+Python 3.9.10
+
+einops 0.8.0
+
+numpy 1.26.3
+
+pandas 2.2.2
+
+torch 1.8.1
 
 
 ## Acknowledgement
