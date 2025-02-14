@@ -1,0 +1,4 @@
+einops==0.8.0
+numpy==1.26.3
+pandas==2.2.2
+torch==1.8.1
