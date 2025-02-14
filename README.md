@@ -52,9 +52,3 @@ https://github.com/thuml/Autoformer
 https://github.com/alipay/Pyraformer
 
 https://github.com/MAZiqing/FEDformer
-
-The following two Vision Transformer works also inspire our DSW embedding and HED designs:
-
-https://github.com/google-research/vision_transformer
-
-https://github.com/microsoft/Swin-Transformer
