@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from .bbblinear import BBBLinear
+from .bbb_linear import BBBLinear
 
 class AttentionPooling(nn.Module):
     def __init__(self, d_model, epoch_tracker=None):

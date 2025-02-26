@@ -1,3 +1,5 @@
+import numpy as np
+
 class EarlyStopping:
     def __init__(self, patience=7, verbose=False, delta=0, num_models=1):
         self.patience = patience
