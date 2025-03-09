@@ -31,7 +31,7 @@ torch 1.8.1
 
 ## Acknowledgement
 
-We build our proposed regularization approach top of the Crossformer transformer architecture proposed in:
+We build our proposed regularization for a generic vision transformer architecture. We have also shown it to work on more sophisticated custom architectures such as the Crossformer proposed in:
 ```
 @inproceedings{
 zhang2023crossformer,
@@ -41,7 +41,7 @@ booktitle={International Conference on Learning Representations},
 year={2023},
 }
 ```
-However, the approach is general and easily translates to other transformer architectures. We appreciate the following works for their valuable code for transformer implementations:
+However, the approach is general and easily translates to other transformer architectures. We appreciate the following works for their valuable code for code utilities:
 
 https://github.com/Thinklab-SJTU/Crossformer
 
