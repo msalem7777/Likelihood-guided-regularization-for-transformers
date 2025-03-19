@@ -11,11 +11,14 @@ import torch.nn as nn
 import torch.optim as optim
 import time
 import random
+from torch.nn import DataParallel
 from transformer_layers.bbb_ViT import VisionTransformerWithBBB
 from transformer_layers.bbb_linear import BBBLinear
 # from transformer_layers.bbb_ViT import MultiHeadAttention, TransformerEncoderLayerWithBBB, VisionTransformerWithBBB
 from data_loader.dataloader_master import To3Channels, get_vit_dataloaders
 from utils.early_stopping import EarlyStopping
+from utils.learning_rate import adjust_learning_rate
+from utils.metrics import metric, MAE, MSE, RMSE, MAPE, MSPE, LGLOSS
 
 
 class VisionTransformerTrainer:
@@ -381,7 +384,8 @@ class VisionTransformerTrainer:
             batch_masks = []  # List to store masks for each model in the current batch
 
             for i, (batch_x,batch_y) in enumerate(train_loader):
-                
+
+                batch_y = batch_y.to(self.device)
                 iter_count += 1
 
                 # Handle Ising phase-specific computations
