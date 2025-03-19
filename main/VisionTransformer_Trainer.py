@@ -9,16 +9,34 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import copy
 import time
 import random
 from torch.nn import DataParallel
+from joblib import Parallel, delayed
 from transformer_layers.bbb_ViT import VisionTransformerWithBBB
 from transformer_layers.bbb_linear import BBBLinear
-# from transformer_layers.bbb_ViT import MultiHeadAttention, TransformerEncoderLayerWithBBB, VisionTransformerWithBBB
 from data_loader.dataloader_master import To3Channels, get_vit_dataloaders
 from utils.early_stopping import EarlyStopping
 from utils.learning_rate import adjust_learning_rate
 from utils.metrics import metric, MAE, MSE, RMSE, MAPE, MSPE, LGLOSS
+
+
+def compute_weight_dropout(nr, nc, model, batch_x, batch_y, loss_NoDrop_item, criterion, epsilon, device):
+
+    model_p = copy.deepcopy(model).to(device).eval()
+    final_layer = model_p.classification_head[-1]
+
+    # Drop the weight
+    final_layer.mean_weight[nr, nc].data.zero_()
+
+    with torch.no_grad():
+        output_dropped = model_p(batch_x.to(device))
+        loss_dropped = -criterion(output_dropped, batch_y.to(device))
+        loss_difference = 0.5*(loss_NoDrop_item - loss_dropped.item()) + epsilon
+        dropout_prob = 1 - 1 / (1 + torch.exp(-2 * loss_difference))
+
+    return dropout_prob.item()
 
 
 class VisionTransformerTrainer:
