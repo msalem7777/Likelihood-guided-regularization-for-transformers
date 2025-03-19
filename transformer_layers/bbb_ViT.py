@@ -70,6 +70,8 @@ class TransformerEncoderLayerWithBBB(nn.Module):
         self.norm1 = nn.LayerNorm(embed_dim)
         
         self.self_attn = nn.MultiheadAttention(embed_dim, num_heads, dropout=dropout, batch_first=True)
+
+        self.norm2 = nn.LayerNorm(embed_dim)
         
         self.mlp = nn.Sequential(
             BBBLinear(embed_dim, int(embed_dim * mlp_ratio)),
@@ -78,8 +80,6 @@ class TransformerEncoderLayerWithBBB(nn.Module):
             BBBLinear(int(embed_dim * mlp_ratio), embed_dim),
             nn.Dropout(dropout),
         )
-
-        self.norm2 = nn.LayerNorm(embed_dim)
 
     def forward(self, x):
         # PRE-LayerNorm for Attention
