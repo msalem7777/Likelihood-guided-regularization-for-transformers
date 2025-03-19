@@ -79,10 +79,15 @@ class TransformerEncoderLayerWithBBB(nn.Module):
         )
 
     def forward(self, x):
-        attn_output, _ = self.self_attn(x, x, x)
-        x = self.norm1(x + attn_output)
-        mlp_output = self.mlp(x)
-        x = self.norm2(x + mlp_output)
+        # PRE-LayerNorm for Attention
+        x_norm = self.norm1(x)
+        attn_output, _ = self.self_attn(x_norm, x_norm, x_norm)
+        x = x + attn_output  # Residual connection
+
+        # PRE-LayerNorm for MLP
+        x_norm = self.norm2(x)
+        mlp_output = self.mlp(x_norm)
+        x = x + mlp_output  # Residual connection
         return x
 
 class VisionTransformerWithBBB(nn.Module):
