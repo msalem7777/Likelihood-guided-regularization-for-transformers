@@ -6,6 +6,7 @@
 
 import os
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -19,7 +20,7 @@ from transformer_layers.bbb_linear import BBBLinear
 from data_loader.dataloader_master import To3Channels, get_vit_dataloaders
 from utils.early_stopping import EarlyStopping
 from utils.learning_rate import adjust_learning_rate
-from utils.metrics import metric, MAE, MSE, RMSE, MAPE, MSPE, LGLOSS
+from utils.metrics import metric, MAE, MSE, RMSE, MAPE, MSPE, LGLOSS, ACCRCY
 
 
 def compute_weight_dropout(nr, nc, model, batch_x, batch_y, loss_NoDrop_item, criterion, epsilon, device):

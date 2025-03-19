@@ -6,6 +6,7 @@
 
 import os
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -19,7 +20,7 @@ from transformer_layers.bbb_linear import BBBLinear
 from data_loader.dataloader_master import To3Channels, get_vit_dataloaders
 from utils.early_stopping import EarlyStopping
 from utils.learning_rate import adjust_learning_rate
-from utils.metrics import metric, MAE, MSE, RMSE, MAPE, MSPE, LGLOSS
+from utils.metrics import metric, MAE, MSE, RMSE, MAPE, MSPE, LGLOSS, ACCRCY
 
 
 def compute_weight_dropout(nr, nc, model, batch_x, batch_y, loss_NoDrop_item, criterion, epsilon, device):
@@ -122,7 +123,8 @@ class pVisionTransformerTrainer:
             batch_size=args.batch_size,
             val_split=args.val_split,  # Fraction of data for validation
             test_split=args.test_split,  # Fraction of data for testing
-            image_size=args.img_size  # Image resizing for ViT
+            image_size=args.img_size,  # Image resizing for ViT
+            num_workers = args.num_workers
         )
     
         # Map flag to the correct dataset and dataloader
@@ -256,16 +258,18 @@ class pVisionTransformerTrainer:
         Unified function to evaluate the model(s) on the test dataset.
         
         Args:
-            save_pred: Whether to save predictions and ground truths.
-            inverse: Whether to inverse the predictions if necessary.
-            load_saved: If True, assumes saved models are being evaluated (like eval).
-            return_metrics: If True, returns the computed metrics (like eval).
+            save_pred (bool): Whether to save predictions and ground truths.
+            inverse (bool): Whether to inverse the predictions if necessary.
+            load_saved (bool): If True, assumes saved models are being evaluated (like eval).
+            return_metrics (bool): If True, returns computed accuracy.
+        
+        Returns:
+            float: Accuracy (if return_metrics=True).
         """
         args = self.args
     
         # Load dataset and dataloader
         if load_saved:
-            # Explicit dataset setup for saved models
             data_set = Dataset_gen(
                 root_path=args.path,
                 data_path=args.data_path,
@@ -283,17 +287,18 @@ class pVisionTransformerTrainer:
                 drop_last=False,
             )
         else:
-            # Use the existing `_get_data` method
             data_set, data_loader = self._get_data(flag='test')
     
-        metrics_all = [[] for _ in range(self.args.num_models)]
+        accuracies_all = []  # Stores accuracy for each model
         all_preds = [[] for _ in range(self.args.num_models)]
         all_trues = [[] for _ in range(self.args.num_models)]
-        instance_num = 0
-    
+        
         # Evaluate each model
         for model_idx, model in enumerate(self.models):
             model.eval()
+            all_pred_vals = []
+            all_true_vals = []
+    
             with torch.no_grad():
                 for batch_x, batch_y in data_loader:
                     batch_x, batch_y = batch_x.to(self.device), batch_y.to(self.device)
@@ -304,47 +309,41 @@ class pVisionTransformerTrainer:
                         pred = self.inverse_transform(pred)
     
                     true = batch_y
-                    batch_size = pred.size(0)
-                    instance_num += batch_size
     
-                    # Calculate metrics
-                    batch_metric = np.array(
-                        metric(pred.cpu().numpy(), true.cpu().numpy())
-                    ) * batch_size
-                    metrics_all[model_idx].append(batch_metric)
+                    # Convert predictions to class labels if necessary
+                    pred_labels = torch.argmax(pred, dim=1) if pred.ndim > 1 else pred.round()
     
-                    if save_pred:
-                        all_preds[model_idx].append(pred.cpu().numpy())
-                        all_trues[model_idx].append(true.cpu().numpy())
+                    all_pred_vals.append(pred_labels.cpu().numpy())
+                    all_true_vals.append(true.cpu().numpy())
+    
+            # Compute accuracy using ACCURACY function
+            all_pred_vals = np.concatenate(all_pred_vals, axis=0)
+            all_true_vals = np.concatenate(all_true_vals, axis=0)
+            accuracy = ACCURACY(all_pred_vals, all_true_vals)
+            accuracies_all.append(accuracy)
+    
+            print(f'Model {model_idx} - Accuracy: {accuracy:.2f}%')
+    
+            if save_pred:
+                all_preds[model_idx] = all_pred_vals
+                all_trues[model_idx] = all_true_vals
     
         # Save results
         folder_path = os.path.join(args.path, 'results')
         os.makedirs(folder_path, exist_ok=True)
     
         for model_idx in range(self.args.num_models):
-            metrics_all[model_idx] = np.stack(metrics_all[model_idx], axis=0)
-            metrics_mean = metrics_all[model_idx].sum(axis=0) / instance_num
-    
-            mae, mse, rmse, mape, mspe, lgls = metrics_mean
-            print(f'Model {model_idx} - CBE: {lgls}')
-    
-            # Save metrics
-            metrics_df = pd.DataFrame(
-                {"Metrics": ["MAE", "MSE", "RMSE", "MAPE", "MSPE", "CBE"],
-                 "Values": [mae, mse, rmse, mape, mspe, lgls]}
-            )
-            metrics_df.to_csv(os.path.join(folder_path, f'metrics_model_{model_idx}.csv'), index=False)
+            # Save accuracy to CSV
+            metrics_df = pd.DataFrame({"Metrics": ["Accuracy"], "Values": [accuracies_all[model_idx]]})
+            metrics_df.to_csv(os.path.join(folder_path, f'accuracy_model_{model_idx}.csv'), index=False)
     
             if save_pred:
-                preds = np.concatenate(all_preds[model_idx], axis=0)
-                trues = np.concatenate(all_trues[model_idx], axis=0)
+                pd.DataFrame(all_preds[model_idx]).to_csv(os.path.join(folder_path, f'pred_model_{model_idx}.csv'), index=False)
+                pd.DataFrame(all_trues[model_idx]).to_csv(os.path.join(folder_path, f'true_model_{model_idx}.csv'), index=False)
     
-                pd.DataFrame(preds).to_csv(os.path.join(folder_path, f'pred_model_{model_idx}.csv'), index=False)
-                pd.DataFrame(trues).to_csv(os.path.join(folder_path, f'true_model_{model_idx}.csv'), index=False)
-    
-        # Optionally return metrics for programmatic use
         if return_metrics:
-            return [mae, mse, rmse, mape, mspe, lgls]
+            return accuracies_all
+
     
     def train(self):
 

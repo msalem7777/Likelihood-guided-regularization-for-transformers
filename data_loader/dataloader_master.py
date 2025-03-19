@@ -23,7 +23,7 @@ class To3Channels:
     def __call__(self, img):
         return img.repeat(3, 1, 1)  # Repeat the single channel to create 3 channels
 
-def get_vit_dataloaders(dataset_name, data_dir, batch_size=32, val_split=0.2, test_split=0.1, image_size=224):
+def get_vit_dataloaders(dataset_name, data_dir, batch_size=32, val_split=0.2, test_split=0.1, image_size=224, num_workers = 0):
     """
     Creates DataLoaders for a dataset compatible with Vision Transformers.
 
@@ -38,13 +38,20 @@ def get_vit_dataloaders(dataset_name, data_dir, batch_size=32, val_split=0.2, te
     Returns:
         dict: A dictionary containing train, validation, and test DataLoaders.
     """
-    # Define standard transformations for Vision Transformers
-    vit_transforms = transforms.Compose([
-        transforms.Resize((image_size, image_size)),  # Resize to image_size x image_size
-        transforms.ToTensor(),  # Convert to PyTorch Tensor
-        To3Channels(),  # Convert single-channel images to 3 channels
-        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])  # Normalize to [-1, 1]
-    ])
+    # Conditional transforms
+    if dataset_name in ['mnist', 'fashionmnist']:
+        vit_transforms = transforms.Compose([
+            transforms.Resize((image_size, image_size)),
+            transforms.ToTensor(),
+            To3Channels(),
+            transforms.Normalize([0.5]*3, [0.5]*3)
+        ])
+    else:
+        vit_transforms = transforms.Compose([
+            transforms.Resize((image_size, image_size)),
+            transforms.ToTensor(),
+            transforms.Normalize([0.5]*3, [0.5]*3)
+        ])
 
     # Load the dataset
     if dataset_name == 'cifar10':
@@ -71,9 +78,9 @@ def get_vit_dataloaders(dataset_name, data_dir, batch_size=32, val_split=0.2, te
 
     # Create DataLoaders
     dataloaders = {
-        'train': DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0),
-        'val': DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0),
-        'test': DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+        'train': DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers),
+        'val': DataLoader(val_dataset, batch_size=min(1024, val_size), shuffle=False, num_workers=num_workers),
+        'test': DataLoader(test_dataset, batch_size=min(1024, test_size), shuffle=False, num_workers=num_workers)
     }
 
     return dataloaders
