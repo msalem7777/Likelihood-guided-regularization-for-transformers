@@ -67,9 +67,10 @@ class TransformerEncoderLayerWithBBB(nn.Module):
     def __init__(self, embed_dim, num_heads, mlp_ratio=4.0, dropout=0.0, device=torch.device("cuda" if torch.cuda.is_available() else "cpu")):
         super(TransformerEncoderLayerWithBBB, self).__init__()
 
-        self.self_attn = nn.MultiheadAttention(embed_dim, num_heads, dropout=dropout, batch_first=True)
         self.norm1 = nn.LayerNorm(embed_dim)
-        self.norm2 = nn.LayerNorm(embed_dim)
+        
+        self.self_attn = nn.MultiheadAttention(embed_dim, num_heads, dropout=dropout, batch_first=True)
+        
         self.mlp = nn.Sequential(
             BBBLinear(embed_dim, int(embed_dim * mlp_ratio)),
             nn.GELU(),
@@ -77,6 +78,8 @@ class TransformerEncoderLayerWithBBB(nn.Module):
             BBBLinear(int(embed_dim * mlp_ratio), embed_dim),
             nn.Dropout(dropout),
         )
+
+        self.norm2 = nn.LayerNorm(embed_dim)
 
     def forward(self, x):
         # PRE-LayerNorm for Attention
