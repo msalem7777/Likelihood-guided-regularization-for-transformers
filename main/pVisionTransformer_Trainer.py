@@ -39,6 +39,13 @@ def compute_weight_dropout(nr, nc, model, batch_x, batch_y, loss_NoDrop_item, cr
     return dropout_prob.item()
 
 
+def compute_diag_hessian_element(idx, grad1_flat, param, device):
+    grad2 = torch.autograd.grad(
+        grad1_flat[idx], param, retain_graph=True
+    )[0]
+    return grad2.view(-1)[idx].item()
+    
+
 class pVisionTransformerTrainer:
 
     def __init__(self, args):
@@ -595,16 +602,19 @@ class pVisionTransformerTrainer:
                                     
                                     # Compute first derivative
                                     grad1 = torch.autograd.grad(loss, param, create_graph=True)[0]
+                                    grad1_flat = grad1.view(-1)
+
+                                    # Parallel compute diagonal Hessian
+                                    diag_elements = Parallel(n_jobs=-1, backend='loky')(
+                                        delayed(compute_diag_hessian_element)(
+                                            idx, grad1_flat, param, self.device
+                                        )
+                                        for idx in range(param.numel())
+                                    )
         
-                                    # Initialize diagonal Hessian
-                                    diag_hessian = torch.zeros_like(param)
+                                    # Stack into Hessian
+                                    diag_hessian = torch.tensor(diag_elements, device=param.device).view_as(param)
                             
-                                    # Compute diagonal of Hessian
-                                    for idx in range(param.numel()):
-                                        # Compute the second derivative
-                                        grad2 = torch.autograd.grad(grad1.view(-1)[idx], param, retain_graph=True)[0]
-                                        diag_hessian.view(-1)[idx] = grad2.view(-1)[idx]
-                                    
                                     # Store saliency scores
                                     saliency_scores[name] = 0.5 * diag_hessian * (param ** 2)
 
