@@ -319,7 +319,7 @@ class pVisionTransformerTrainer:
             # Compute accuracy using ACCURACY function
             all_pred_vals = np.concatenate(all_pred_vals, axis=0)
             all_true_vals = np.concatenate(all_true_vals, axis=0)
-            accuracy = ACCURACY(all_pred_vals, all_true_vals)
+            accuracy = ACCRCY(all_pred_vals, all_true_vals)
             accuracies_all.append(accuracy)
     
             print(f'Model {model_idx} - Accuracy: {accuracy:.2f}%')
