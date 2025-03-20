@@ -604,7 +604,7 @@ class pVisionTransformerTrainer:
                                     grad1_flat = grad1.view(-1)
 
                                     # Parallel compute diagonal Hessian
-                                    diag_elements = Parallel(n_jobs=-1, backend='loky')(
+                                    diag_elements = Parallel(n_jobs=-1, backend='threading')(
                                         delayed(compute_diag_hessian_element)(
                                             idx, grad1_flat, param, self.device
                                         )
@@ -632,7 +632,7 @@ class pVisionTransformerTrainer:
                     time_now = time.time()
 
             print("Epoch: {} cost time: {}".format(epoch+1, time.time()-epoch_time))
-            # Validation and early stopping
+            # Validation and early stopping          
             train_loss_avg = [np.mean(losses) for losses in train_loss]
             vali_loss_avg = [self.vali(vali_loader, criterion, model) for model in self.models]  # Pass each model
             test_loss_avg = [self.vali(test_loader, criterion, model) for model in self.models]  # Pass each model
