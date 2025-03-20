@@ -22,10 +22,11 @@ class EarlyStopping:
         
         for model_idx in range(self.num_models):
             score = -val_loss[model_idx]
+            old_val_loss = self.val_loss_mins[model_idx]  # Fetch previous best loss
             if self.best_scores[model_idx] is None:
                 self.best_scores[model_idx] = score
                 self.val_loss_mins[model_idx] = val_loss[model_idx]
-                self.save_checkpoint(val_loss[model_idx], models[model_idx], path, model_idx)
+                self.save_checkpoint(val_loss[model_idx], models[model_idx], path, model_idx, old_val_loss)
                 any_model_improved = True
             elif score < self.best_scores[model_idx] + self.delta:
                 pass
@@ -33,7 +34,7 @@ class EarlyStopping:
                 # Improvement for this model
                 self.best_scores[model_idx] = score
                 self.val_loss_mins[model_idx] = val_loss[model_idx]
-                self.save_checkpoint(val_loss[model_idx], models[model_idx], path, model_idx)
+                self.save_checkpoint(val_loss[model_idx], models[model_idx], path, model_idx, old_val_loss)
                 any_model_improved = True
             
 
@@ -46,8 +47,8 @@ class EarlyStopping:
             if self.counter >= self.patience:
                 self.early_stop = True
 
-    def save_checkpoint(self, val_loss, model, path, model_idx):
+    def save_checkpoint(self, val_loss, model, path, model_idx, old_val_loss):
         if self.verbose:
-            print(f'Model {model_idx}: Validation loss decreased ({self.val_loss_mins[model_idx]:.6f} --> {val_loss:.6f}).  Saving model ...')
+            print(f'Model {model_idx}: Validation loss decreased ({old_val_loss:.6f} --> {val_loss:.6f}).  Saving model ...')
         torch.save(model.state_dict(), path + f'/checkpoint_S-BICF_model_{model_idx}.pth')
         self.val_loss_mins[model_idx] = val_loss
