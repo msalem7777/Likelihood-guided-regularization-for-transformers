@@ -45,7 +45,40 @@ def compute_diag_hessian_element(idx, grad1_flat, param, device):
         grad1_flat[idx], param, retain_graph=True
     )[0]
     return grad2.view(-1)[idx].item()
-    
+
+
+def hutchinson_diagonal_approximation(model, loss, param_name='mean_weight', num_samples=1):
+    """
+    Approximates diagonal of the Hessian using Hutchinson's method.
+
+    Args:
+        model: The PyTorch model
+        loss: Computed scalar loss from forward pass
+        param_name: Name keyword to filter parameters
+        num_samples: Number of Rademacher samples (higher = smoother)
+
+    Returns:
+        Dictionary of saliency scores
+    """
+    saliency_scores = {}
+
+    for name, param in model.named_parameters():
+        if param.requires_grad and param_name in name:
+            device = param.device
+            diag_hessian = torch.zeros_like(param)
+
+            for _ in range(num_samples):
+                v = torch.randint_like(param, low=0, high=2).float() * 2 - 1  # Rademacher
+                grad1 = torch.autograd.grad(loss, param, create_graph=True)[0]
+                grad_v = torch.sum(grad1 * v)
+                hvp = torch.autograd.grad(grad_v, param, retain_graph=True)[0]
+                diag_hessian += hvp * v
+
+            diag_hessian /= num_samples
+            saliency_scores[name] = 0.5 * diag_hessian * (param ** 2)
+
+    return saliency_scores
+
 
 class pVisionTransformerTrainer:
 
@@ -601,19 +634,16 @@ class pVisionTransformerTrainer:
                                     
                                     # Compute first derivative
                                     grad1 = torch.autograd.grad(loss, param, create_graph=True)[0]
-                                    grad1_flat = grad1.view(-1)
-
-                                    # Parallel compute diagonal Hessian
-                                    diag_elements = Parallel(n_jobs=-1, backend='threading')(
-                                        delayed(compute_diag_hessian_element)(
-                                            idx, grad1_flat, param, self.device
-                                        )
-                                        for idx in range(param.numel())
-                                    )
         
-                                    # Stack into Hessian
-                                    diag_hessian = torch.tensor(diag_elements, device=param.device).view_as(param)
+                                    # Initialize diagonal Hessian
+                                    diag_hessian = torch.zeros_like(param)
                             
+                                    # Compute diagonal of Hessian
+                                    for idx in range(param.numel()):
+                                        # Compute the second derivative
+                                        grad2 = torch.autograd.grad(grad1.view(-1)[idx], param, retain_graph=True)[0]
+                                        diag_hessian.view(-1)[idx] = grad2.view(-1)[idx]
+                                    
                                     # Store saliency scores
                                     saliency_scores[name] = 0.5 * diag_hessian * (param ** 2)
 
