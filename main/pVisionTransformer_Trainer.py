@@ -439,7 +439,7 @@ class pVisionTransformerTrainer:
                     indices = [(nr, nc) for nr in range(n_rows) for nc in range(n_cols)]
 
                     # Execute parallel computation
-                    weight_dropout_probs = Parallel(n_jobs=-1, backend='loky')(
+                    weight_dropout_probs = Parallel(n_jobs=-1, backend='threading')(
                         delayed(compute_weight_dropout)(
                             nr, nc, model, batch_x_cpu, batch_y_cpu,
                             loss_NoDrop.item(), criterion, epsilon, torch.device('cpu')
