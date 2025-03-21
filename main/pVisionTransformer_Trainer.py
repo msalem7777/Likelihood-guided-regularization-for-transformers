@@ -23,19 +23,24 @@ from utils.learning_rate import adjust_learning_rate
 from utils.metrics import metric, MAE, MSE, RMSE, MAPE, MSPE, LGLOSS, ACCRCY
 
 
-def compute_weight_dropout(nr, nc, model, batch_x, batch_y, loss_NoDrop_item, criterion, epsilon, device):
+def compute_weight_dropout(nr, nc, model, batch_x, batch_y, loss_NoDrop_item, epsilon):
+    # Assumes model, batch_x, and batch_y are already on CPU
+    model.eval()
 
-    model_p = copy.deepcopy(model).to(device).eval()
-    final_layer = model_p.classification_head[-1]
-
-    # Drop the weight
-    final_layer.mean_weight[nr, nc].data.zero_()
+    final_layer = model.classification_head[-1]
 
     with torch.no_grad():
-        output_dropped = model_p(batch_x.to(device))
-        loss_dropped = -criterion(output_dropped, batch_y.to(device))
-        loss_difference = 0.5*(loss_NoDrop_item - loss_dropped.item()) + epsilon
-        dropout_prob = 1 - 1 / (1 + torch.exp(-2 * loss_difference))
+        # Drop the specific weight
+        original_weight = final_layer.mean_weight[nr, nc].item()
+        final_layer.mean_weight[nr, nc] = 0.0
+
+        output_dropped = model(batch_x)
+        loss_dropped = -torch.nn.functional.cross_entropy(output_dropped, batch_y)
+        loss_difference = 0.5 * (loss_NoDrop_item - loss_dropped.item()) + epsilon
+        dropout_prob = 1 - 1 / (1 + torch.exp(torch.tensor(-2 * loss_difference)))
+
+        # Restore the original weight (safety!)
+        final_layer.mean_weight[nr, nc] = original_weight
 
     return dropout_prob.item()
 
@@ -45,40 +50,6 @@ def compute_diag_hessian_element(idx, grad1_flat, param, device):
         grad1_flat[idx], param, retain_graph=True
     )[0]
     return grad2.view(-1)[idx].item()
-
-
-def hutchinson_diagonal_approximation(model, loss, param_name='mean_weight', num_samples=1):
-    """
-    Approximates diagonal of the Hessian using Hutchinson's method.
-
-    Args:
-        model: The PyTorch model
-        loss: Computed scalar loss from forward pass
-        param_name: Name keyword to filter parameters
-        num_samples: Number of Rademacher samples (higher = smoother)
-
-    Returns:
-        Dictionary of saliency scores
-    """
-    saliency_scores = {}
-
-    for name, param in model.named_parameters():
-        if param.requires_grad and param_name in name:
-            device = param.device
-            diag_hessian = torch.zeros_like(param)
-
-            for _ in range(num_samples):
-                v = torch.randint_like(param, low=0, high=2).float() * 2 - 1  # Rademacher
-                grad1 = torch.autograd.grad(loss, param, create_graph=True)[0]
-                grad_v = torch.sum(grad1 * v)
-                hvp = torch.autograd.grad(grad_v, param, retain_graph=True)[0]
-                diag_hessian += hvp * v
-
-            diag_hessian /= num_samples
-            saliency_scores[name] = 0.5 * diag_hessian * (param ** 2)
-
-    return saliency_scores
-
 
 class pVisionTransformerTrainer:
 
@@ -443,6 +414,7 @@ class pVisionTransformerTrainer:
             for i, (batch_x,batch_y) in enumerate(train_loader):
 
                 batch_y = batch_y.to(self.device)
+                batch_x = batch_x.to(self.device)
                 iter_count += 1
 
                 # Handle Ising phase-specific computations
@@ -456,11 +428,13 @@ class pVisionTransformerTrainer:
                     weight_dropout_probs = [] # Calculate dropout probabilities for weights
                     loss_NoDrop = -criterion(pred, batch_y) # Taking negative to convert to log likelihood instead of negative log-likelihood 
 
+                    key = (self.models[0], final_layer_name)
+
                     if self.args.ising_type == "LM_saliency_scores":
                         saliency_scores = {}
                         deda = {}
                         grad = final_layer.mean_weight.grad  # Already computed during backprop
-                        input_activations = self.layer_inputs[(self.models[0], final_layer_name)]
+                        input_activations = self.layer_inputs[(self.models[0], final_layer_name)].mean(dim=0)
                         deda[final_layer_name] = 2*(grad / (input_activations + epsilon))**2  
                         saliency_scores[final_layer_name] = deda[final_layer_name].clone()
                     
@@ -471,11 +445,14 @@ class pVisionTransformerTrainer:
 
                     indices = [(nr, nc) for nr in range(n_rows) for nc in range(n_cols)]
 
+                    model_cpu = copy.deepcopy(model).cpu()
+                    model_cpu.eval()
+
                     # Execute parallel computation
                     weight_dropout_probs = Parallel(n_jobs=-1, backend='threading')(
                         delayed(compute_weight_dropout)(
-                            nr, nc, model, batch_x_cpu, batch_y_cpu,
-                            loss_NoDrop.item(), criterion, epsilon, torch.device('cpu')
+                            nr, nc, model_cpu, batch_x_cpu, batch_y_cpu,
+                            loss_NoDrop.item(), epsilon
                         )
                         for nr, nc in indices
                     )
@@ -556,8 +533,14 @@ class pVisionTransformerTrainer:
                                     curr_param = next_layer.mean_weight
                                     prev_param = layer.mean_weight
                                     input_activations = self.layer_inputs[(self.models[0], next_layer_name)]
+                                    # Collapse batch dimension to get per-unit input magnitude
                                     if input_activations.dim() == 3:
-                                        input_activations = input_activations.sum(dim=1)
+                                        input_activations = input_activations.mean(dim=1)
+                                    elif input_activations.dim() == 2:
+                                        input_activations = input_activations.mean(dim=0)
+                                    
+                                    # Make sure it's on the same device as the model parameters
+                                    input_activations = input_activations.to(curr_param.device)
                                     deda[next_layer_name] = (curr_param.grad / (input_activations + 1e-8))**2  # Compute deda for the current layer
                                     # Propagate deda by weighting with the square of next layer's weights
                                     deda[next_layer_name] = torch.matmul(deda[next_layer_name].T, torch.matmul(prev_param.T ** 2, deda[layer_name])).T 

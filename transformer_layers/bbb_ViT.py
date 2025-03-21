@@ -139,8 +139,6 @@ class VisionTransformerWithBBB(nn.Module):
         )
 
     def forward(self, x):
-        # Move input to the correct device
-        x = x.to(self.device)
 
         # Reshape and flatten patches
         batch_size = x.shape[0]
@@ -157,7 +155,7 @@ class VisionTransformerWithBBB(nn.Module):
 
         # Use CLS token for classification
         cls_token = x.mean(dim=1)
-
+        
         # Forward through classification head
         logits = self.classification_head(cls_token)
         return logits

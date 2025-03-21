@@ -70,40 +70,35 @@ class BBBLinear(nn.Module):
         self.custom_mask_prob = mask
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-
+        device = self.mean_weight.device
         current_epoch = self.epoch_tracker.current_epoch if self.epoch_tracker else 'pilot'
-        if current_epoch == 'ising':
-            pass
-        elif current_epoch == 'fine-tuning':
-            pass
-            # print(self.custom_mask_prob)
             
         # Sample standard deviation for the weights
-        std_weight = torch.exp(self.log_std_weight)  # Standard deviation = exp(log_std)
+        std_weight = torch.exp(self.log_std_weight).to(device)
         
         if self.training:   
             # Sample from the normal distribution centered at the mean weight            
-            sampled_weights = torch.normal(mean=torch.zeros_like(self.mean_weight), std=std_weight)  # Correct normal sampling
+            sampled_weights = torch.normal(mean=torch.zeros_like(self.mean_weight, device=device),std=std_weight)
 
             if self.custom_mask_prob is not None:
                 # Apply the custom mask (if provided) to the mean_weight
-                binary_mask = 1-torch.bernoulli(self.custom_mask_prob.view(self.custom_mask_prob.shape))
-                prob_mask = 1-self.custom_mask_prob
-                weight = (self.mean_weight + std_weight * torch.randn_like(self.mean_weight)) * prob_mask + sampled_weights * (1 - prob_mask)
+                binary_mask = 1-torch.bernoulli(self.custom_mask_prob.to(device).view(self.custom_mask_prob.shape))
+                prob_mask = 1-self.custom_mask_prob.to(device)
+                weight = (self.mean_weight + std_weight * torch.randn_like(self.mean_weight, device=device)) * prob_mask + sampled_weights * (1 - prob_mask)
                 
             else:
                 # Create a binary mask to apply DropConnect (randomly keep or "drop" weights)
-                mask = torch.bernoulli(torch.full(self.mean_weight.shape, 1 - self.p)).to(self.mean_weight.device)
-                weight = (self.mean_weight + std_weight * torch.randn_like(self.mean_weight)) * mask + sampled_weights * (1 - mask)        
+                mask = torch.bernoulli(torch.full(self.mean_weight.shape, 1 - self.p)).to(device)
+                weight = (self.mean_weight + std_weight * torch.randn_like(self.mean_weight, device=device)) * mask + sampled_weights * (1 - mask)        
                 
         else:
             # In evaluation mode, use weighted means
-            mvn_0 = torch.normal(0, std_weight)  # MVN(0, sigma^2 I)
-            mvn_M = self.mean_weight + std_weight * torch.randn_like(self.mean_weight)  # MVN(M, sigma^2 I)
+            mvn_0 = torch.normal(0, std_weight).to(device)
+            mvn_M = self.mean_weight + std_weight * torch.randn_like(self.mean_weight, device=device)
         
             # Apply custom mask during evaluation if available
             if self.custom_mask_prob is not None:
-                weight =  (1 - self.custom_mask_prob) * mvn_M
+                weight =  (1 - self.custom_mask_prob.to(device)) * mvn_M
             else:
              # Weighted sum based on p
                 weight = (1 - self.p) * mvn_M   
@@ -112,14 +107,14 @@ class BBBLinear(nn.Module):
         if self.mean_bias is not None:
             if self.training:
                 
-                std_bias = torch.exp(self.log_std_bias)
-                bias = (self.mean_bias + std_bias * torch.randn_like(self.mean_bias)) # No Spike-Slab on bias
+                std_bias = torch.exp(self.log_std_bias).to(device)
+                bias = (self.mean_bias + std_bias * torch.randn_like(self.mean_bias, device=device))
                 
             else:
                 bias = self.mean_bias
         else:
             bias = None
-
+                
         # Apply the linear transformation using the masked weights and bias
         return F.linear(input, weight, bias)
 
