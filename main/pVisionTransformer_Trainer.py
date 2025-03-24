@@ -44,6 +44,26 @@ def compute_weight_dropout(nr, nc, model, batch_x, batch_y, loss_NoDrop_item, ep
 
     return dropout_prob.item()
 
+def clone_model_to_cpu(original_model, args, epoch_tracker=None):
+    model_cpu = VisionTransformerWithBBB(
+        img_size=args.img_size,
+        patch_size=args.patch_size,
+        num_classes=args.num_classes,
+        embed_dim=args.embed_dim,
+        num_heads=args.num_heads,
+        depth=args.depth,
+        dropout=args.dropout,
+        device=torch.device('cpu'),  # Force to CPU
+        epoch_tracker=epoch_tracker  # Pass for phase tracking if needed
+    ).float()
+
+    model_cpu.load_state_dict(original_model.state_dict())
+    model_cpu.eval()
+
+    for param in model_cpu.parameters():
+        param.requires_grad = False
+
+    return model_cpu
 
 def compute_diag_hessian_element(idx, grad1_flat, param, device):
     grad2 = torch.autograd.grad(
@@ -445,9 +465,9 @@ class pVisionTransformerTrainer:
 
                     indices = [(nr, nc) for nr in range(n_rows) for nc in range(n_cols)]
 
-                    model_cpu = copy.deepcopy(model).cpu()
-                    model_cpu.eval()
-
+                    # Move model to CPU just once
+                    model_cpu = clone_model_to_cpu(model, self.args, epoch_tracker=self)
+                    
                     # Execute parallel computation
                     weight_dropout_probs = Parallel(n_jobs=-1, backend='threading')(
                         delayed(compute_weight_dropout)(
@@ -533,11 +553,16 @@ class pVisionTransformerTrainer:
                                     curr_param = next_layer.mean_weight
                                     prev_param = layer.mean_weight
                                     input_activations = self.layer_inputs[(self.models[0], next_layer_name)]
-                                    # Collapse batch dimension to get per-unit input magnitude
+                
+                                    # Collapse batch and sequence/patch dimensions to get per-unit input magnitude
                                     if input_activations.dim() == 3:
-                                        input_activations = input_activations.mean(dim=1)
+                                        # Shape: [batch_size, num_patches, hidden_dim] → mean over 0 and 1 → shape [hidden_dim]
+                                        input_activations = input_activations.mean(dim=(0, 1))
                                     elif input_activations.dim() == 2:
+                                        # Shape: [batch_size, hidden_dim] → mean over batch
                                         input_activations = input_activations.mean(dim=0)
+                                    else:
+                                        raise ValueError(f"Unexpected input_activations shape: {input_activations.shape}")
                                     
                                     # Make sure it's on the same device as the model parameters
                                     input_activations = input_activations.to(curr_param.device)
