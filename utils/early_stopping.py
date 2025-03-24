@@ -10,7 +10,7 @@ class EarlyStopping:
         self.counter = 0
         self.early_stop = False
         self.best_scores = [None] * num_models
-        self.val_loss_mins = [np.Inf] * num_models
+        self.val_loss_mins = [np.inf] * num_models
 
     def __call__(self, val_loss, models, path):
         # Ensure val_loss is a list or array
