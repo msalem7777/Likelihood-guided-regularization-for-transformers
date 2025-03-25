@@ -683,7 +683,7 @@ class pVisionTransformerTrainer:
             self.s_loss_tracker.append(test_loss_avg)
             
             print(f"Epoch: {epoch + 1}, Train Loss: {train_loss_avg}, Vali Loss: {vali_loss_avg}, Test Loss: {test_loss_avg}")
-            early_stopping(vali_loss_avg, self.models, path)  # Early stopping on model[0] as reference
+            early_stopping(vali_loss_avg, self.models, path, phase)  # Early stopping on model[0] as reference
             if early_stopping.early_stop:
                 print("Early stopping")
                 break

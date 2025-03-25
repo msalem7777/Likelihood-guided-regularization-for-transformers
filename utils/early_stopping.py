@@ -12,7 +12,16 @@ class EarlyStopping:
         self.best_scores = [None] * num_models
         self.val_loss_mins = [np.inf] * num_models
 
-    def __call__(self, val_loss, models, path):
+    def __call__(self, val_loss, models, path, phase=None):
+        if phase and phase != getattr(self, "phase", None):
+            print(f"🔁 Phase changed from {getattr(self, 'phase', 'None')} → {phase}")
+            if phase == "fine-tuning":
+                print("🔄 Resetting early stopping history for fine-tuning phase...")
+                self.best_scores = [None] * self.num_models
+                self.val_loss_mins = [np.inf] * self.num_models
+                self.counter = 0
+                self.early_stop = False
+            self.phase = phase
         # Ensure val_loss is a list or array
         if isinstance(val_loss, (int, float)):
             val_loss = [val_loss]  # Convert scalar to list
