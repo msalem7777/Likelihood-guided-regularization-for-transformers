@@ -38,10 +38,13 @@ class EarlyStopping:
                 self.val_loss_mins[model_idx] = val_loss[model_idx]
                 self.save_checkpoint(val_loss[model_idx], models[model_idx], path, model_idx, old_val_loss)
                 any_model_improved = True
-            elif score < self.best_scores[model_idx] + self.delta:
-                pass
-            else:
-                # Improvement for this model
+            elif phase == "ising":
+                # Always save during ising phase
+                if self.verbose:
+                    print(f"Saving model {model_idx} during 'ising' phase regardless of loss.")
+                self.save_checkpoint(val_loss[model_idx], models[model_idx], path, model_idx, old_val_loss)
+
+            elif score >= self.best_scores[model_idx] + self.delta:
                 self.best_scores[model_idx] = score
                 self.val_loss_mins[model_idx] = val_loss[model_idx]
                 self.save_checkpoint(val_loss[model_idx], models[model_idx], path, model_idx, old_val_loss)
