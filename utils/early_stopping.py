@@ -11,6 +11,7 @@ class EarlyStopping:
         self.early_stop = False
         self.best_scores = [None] * num_models
         self.val_loss_mins = [np.inf] * num_models
+        self.phase = None
 
     def __call__(self, val_loss, models, path, phase=None):
         if phase and phase != getattr(self, "phase", None):
