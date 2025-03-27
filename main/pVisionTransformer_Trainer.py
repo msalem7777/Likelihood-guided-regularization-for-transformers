@@ -477,6 +477,8 @@ class pVisionTransformerTrainer:
                 vali_data, vali_loader = vali_data_normal, vali_loader_normal 
                 test_data, test_loader = test_data_normal, test_loader_normal
 
+            train_steps = len(train_loader_normal) 
+
             # Initialize epoch variables
             time_now = time.time()
             iter_count = 0
