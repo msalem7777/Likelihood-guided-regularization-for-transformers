@@ -446,7 +446,7 @@ class pVisionTransformerTrainer:
         if not os.path.exists(path):
             os.makedirs(path)
         
-        train_steps = len(train_loader)
+        train_steps = len(train_loader_normal)
         early_stopping = EarlyStopping(patience=self.args.patience, verbose=True, num_models = self.args.num_models)
         
         model_optim = self._select_optimizer()
