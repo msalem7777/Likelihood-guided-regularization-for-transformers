@@ -139,12 +139,56 @@ class pVisionTransformerTrainer:
             tuple: (Dataset, DataLoader) for the specified phase.
         """
         args = self.args
-    
+
         # Fetch all dataloaders using the pre-existing function
         dataloaders = get_vit_dataloaders(
             dataset_name=args.dataset,  # e.g., 'cifar10', 'cifar100', 'mnist', etc.
             data_dir=args.data_path,   # Path to the data directory
             batch_size=args.batch_size,
+            val_split=args.val_split,  # Fraction of data for validation
+            test_split=args.test_split,  # Fraction of data for testing
+            image_size=args.img_size,  # Image resizing for ViT
+            num_workers = args.num_workers
+        )
+    
+        # Map flag to the correct dataset and dataloader
+        if flag == 'train':
+            data_set = dataloaders['train'].dataset
+            data_loader = dataloaders['train']
+        elif flag == 'val':
+            data_set = dataloaders['val'].dataset
+            data_loader = dataloaders['val']
+        elif flag == 'test':
+            data_set = dataloaders['test'].dataset
+            data_loader = dataloaders['test']
+        else:
+            raise ValueError(f"Invalid flag: {flag}. Choose from 'train', 'val', or 'test'.")
+    
+        # Example: Log dataset stats for training phase
+        if flag == 'train':
+            self.train_pos = sum(1 for _, label in data_set if label == 1)  # Example for binary labels
+            self.train_len = len(data_set)
+            print(f"Training length: {self.train_len}")
+    
+        return data_set, data_loader
+
+    def _get_data_ising(self, flag):
+        """
+        Fetch the appropriate dataset and dataloader for the specified phase.
+    
+        Args:
+            flag (str): Phase indicator ('train', 'val', 'test').
+    
+        Returns:
+            tuple: (Dataset, DataLoader) for the specified phase.
+        """
+        args = self.args
+
+        # Fetch all dataloaders using the pre-existing function
+        dataloaders = get_vit_dataloaders(
+            dataset_name=args.dataset,  # e.g., 'cifar10', 'cifar100', 'mnist', etc.
+            data_dir=args.data_path,   # Path to the data directory
+            batch_size=1,
             val_split=args.val_split,  # Fraction of data for validation
             test_split=args.test_split,  # Fraction of data for testing
             image_size=args.img_size,  # Image resizing for ViT
@@ -389,9 +433,14 @@ class pVisionTransformerTrainer:
             
         epsilon = 1e-9  # Small constant for numerical stability
         
-        train_data, train_loader = self._get_data(flag = 'train')
-        vali_data, vali_loader = self._get_data(flag = 'val')
-        test_data, test_loader = self._get_data(flag = 'test')
+        train_data_normal, train_loader_normal = self._get_data(flag = 'train') 
+        vali_data_normal, vali_loader_normal = self._get_data(flag = 'val')
+        test_data_normal, test_loader_normal = self._get_data(flag = 'test')
+
+        if self.args.ising_batch == True:
+            train_data_ising, train_loader_ising = self._get_data_ising(flag = 'train') 
+            vali_data_ising, vali_loader_ising = self._get_data_ising(flag = 'val')
+            test_data_ising, test_loader_ising = self._get_data_ising(flag = 'test') 
 
         path = os.path.join(self.args.checkpoints)
         if not os.path.exists(path):
@@ -418,6 +467,15 @@ class pVisionTransformerTrainer:
             else:
                 phase = 'fine-tuning'
             self.set_current_phase(phase)
+
+            if (phase == "ising") and (self.args.ising_batch==True):
+                train_data, train_loader = train_data_ising, train_loader_ising
+                vali_data, vali_loader = vali_data_ising, vali_loader_ising  
+                test_data, test_loader = test_data_ising, test_loader_ising
+            else:
+                train_data, train_loader = train_data_normal, train_loader_normal
+                vali_data, vali_loader = vali_data_normal, vali_loader_normal 
+                test_data, test_loader = test_data_normal, test_loader_normal
 
             # Initialize epoch variables
             time_now = time.time()
