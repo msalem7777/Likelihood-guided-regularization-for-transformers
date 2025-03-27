@@ -446,7 +446,6 @@ class pVisionTransformerTrainer:
         if not os.path.exists(path):
             os.makedirs(path)
         
-        train_steps = len(train_loader_normal)
         early_stopping = EarlyStopping(patience=self.args.patience, verbose=True, num_models = self.args.num_models)
         
         model_optim = self._select_optimizer()
@@ -476,6 +475,8 @@ class pVisionTransformerTrainer:
                 train_data, train_loader = train_data_normal, train_loader_normal
                 vali_data, vali_loader = vali_data_normal, vali_loader_normal 
                 test_data, test_loader = test_data_normal, test_loader_normal
+
+            train_steps = len(train_loader)  
 
             # Initialize epoch variables
             time_now = time.time()
