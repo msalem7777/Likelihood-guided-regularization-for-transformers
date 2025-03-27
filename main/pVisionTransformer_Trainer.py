@@ -468,7 +468,7 @@ class pVisionTransformerTrainer:
                 phase = 'fine-tuning'
             self.set_current_phase(phase)
 
-            if (phase == "ising") and (self.args.ising_batch==True):
+            if ((phase == "ising") or ((epoch == (self.args.train_epochs-1)) and (i == (train_steps-1)))) and (self.args.ising_batch==True):
                 train_data, train_loader = train_data_ising, train_loader_ising
                 vali_data, vali_loader = vali_data_ising, vali_loader_ising  
                 test_data, test_loader = test_data_ising, test_loader_ising
