@@ -212,7 +212,6 @@ class pVisionTransformerTrainer:
         if flag == 'train':
             self.train_pos = sum(1 for _, label in data_set if label == 1)  # Example for binary labels
             self.train_len = len(data_set)
-            print(f"Training length: {self.train_len}")
     
         return data_set, data_loader
 
@@ -442,6 +441,8 @@ class pVisionTransformerTrainer:
             vali_data_ising, vali_loader_ising = self._get_data_ising(flag = 'val')
             test_data_ising, test_loader_ising = self._get_data_ising(flag = 'test') 
 
+        train_steps = len(train_loader_normal)  
+
         path = os.path.join(self.args.checkpoints)
         if not os.path.exists(path):
             os.makedirs(path)
@@ -475,8 +476,6 @@ class pVisionTransformerTrainer:
                 train_data, train_loader = train_data_normal, train_loader_normal
                 vali_data, vali_loader = vali_data_normal, vali_loader_normal 
                 test_data, test_loader = test_data_normal, test_loader_normal
-
-            train_steps = len(train_loader)  
 
             # Initialize epoch variables
             time_now = time.time()
