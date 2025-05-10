@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import copy
+import gc
 import time
 import random
 from torch.nn import DataParallel
@@ -539,6 +540,7 @@ class pVisionTransformerTrainer:
 
                     # Convert computed probabilities back to tensor and GPU device
                     weight_dropout_probs = torch.tensor(weight_dropout_probs).to(self.device)
+                    del model_cpu  # <<< FREE CPU CLONE after use
 
                     # Reshape dropout probabilities into mask shape
                     mask = weight_dropout_probs.view(n_rows, n_cols).detach()
@@ -674,6 +676,10 @@ class pVisionTransformerTrainer:
                         print(f'Total num params:{num_weights}')
                         self.ising_params = total_ones
 
+                if not (self.current_epoch == 'fine-tuning' and epoch == self.args.train_epochs + self.args.ising_epochs + self.args.addtl_ft - 1):
+                    self.layer_inputs.clear()
+
+
                 # Training logic (core loop)
                 for optimizer in model_optim: # Zero the gradients for each model's optimizer
                     optimizer.zero_grad()
@@ -729,7 +735,14 @@ class pVisionTransformerTrainer:
                     iter_count = 0
                     time_now = time.time()
 
+                
+
             print("Epoch: {} cost time: {}".format(epoch+1, time.time()-epoch_time))
+
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
             # Validation and early stopping          
             train_loss_avg = [np.mean(losses) for losses in train_loss]
             vali_loss_avg = [self.vali(vali_loader, criterion, model) for model in self.models]  # Pass each model
