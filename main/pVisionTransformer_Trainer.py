@@ -496,6 +496,7 @@ class pVisionTransformerTrainer:
 
             # After self.set_current_phase(phase)
             if phase == "ising" and self.args.use_parallel_ising:
+                print('Launching parallelization threads...')
                 self.parallel_executor = Parallel(n_jobs=min(4, os.cpu_count()), backend='threading')
             else:
                 self.parallel_executor = None
