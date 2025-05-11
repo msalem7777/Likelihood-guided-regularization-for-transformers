@@ -63,6 +63,7 @@ def clone_model_to_cpu(original_model, args, epoch_tracker=None):
 
     for param in model_cpu.parameters():
         param.requires_grad = False
+        param.detach_()
 
     return model_cpu
 
@@ -546,11 +547,8 @@ class pVisionTransformerTrainer:
                         for nr, nc in indices
                     )
 
-                    # Convert computed probabilities back to tensor and GPU device
-                    weight_dropout_probs = torch.tensor(weight_dropout_probs).to(self.device)
-
-                    # Reshape dropout probabilities into mask shape
-                    mask = weight_dropout_probs.view(n_rows, n_cols).detach()
+                    # Convert computed probabilities back to tensor and GPU device, then reshape into mask shape
+                    mask = torch.tensor(weight_dropout_probs, dtype=torch.float32, device=self.device).view(n_rows, n_cols).detach()
                     del weight_dropout_probs
                     del model_cpu
                     gc.collect()
