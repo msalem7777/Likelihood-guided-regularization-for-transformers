@@ -64,6 +64,7 @@ def clone_model_to_cpu(original_model, args, epoch_tracker=None):
     for param in model_cpu.parameters():
         param.requires_grad = False
         param.detach_()
+        param.grad = None
 
     return model_cpu
 
@@ -416,8 +417,6 @@ class pVisionTransformerTrainer:
     
     def train(self):
 
-        # At beginning of train()
-        self.parallel_executor = Parallel(n_jobs=min(8, os.cpu_count()), backend='threading')
         self.layer_inputs = {}  # Store inputs for each (model, layer) pair
     
         if self.args.ising_type == "LM_saliency_scores":
@@ -495,6 +494,12 @@ class pVisionTransformerTrainer:
             epoch_time = time.time()
             batch_masks = []  # List to store masks for each model in the current batch
 
+            # After self.set_current_phase(phase)
+            if phase == "ising" and self.args.use_parallel_ising:
+                self.parallel_executor = Parallel(n_jobs=min(4, os.cpu_count()), backend='threading')
+            else:
+                self.parallel_executor = None
+
             for i, (batch_x,batch_y) in enumerate(train_loader):
 
                 batch_y = batch_y.to(self.device)
@@ -503,7 +508,7 @@ class pVisionTransformerTrainer:
 
                 # Handle Ising phase-specific computations
                 if phase == 'ising':
-                    
+
                     mask_list = []  # List to store masks for each layer in this model for the current batch
                     model = self.models[0] # Forward pass with the weight dropped
                     final_layer = model.classification_head[-1]  # Assuming all models have the same final layer'  
@@ -541,11 +546,14 @@ class pVisionTransformerTrainer:
                         epsilon=epsilon,
                     )
 
-                    # Now just send nr and nc!
-                    weight_dropout_probs = self.parallel_executor(
-                        delayed(compute_weight_dropout_fixed)(nr, nc)
-                        for nr, nc in indices
-                    )
+                    if self.args.use_parallel_ising:
+
+                        weight_dropout_probs = self.parallel_executor(
+                            delayed(compute_weight_dropout_fixed)(nr, nc)
+                            for nr, nc in indices
+                        )
+                    else:
+                        weight_dropout_probs = [compute_weight_dropout_fixed(nr, nc) for nr, nc in indices]
 
                     # Convert computed probabilities back to tensor and GPU device, then reshape into mask shape
                     mask = torch.tensor(weight_dropout_probs, dtype=torch.float32, device=self.device).view(n_rows, n_cols).detach()
@@ -742,8 +750,11 @@ class pVisionTransformerTrainer:
                     print('\tspeed: {:.4f}s/iter'.format(speed))
                     iter_count = 0
                     time_now = time.time()
-
-                
+        
+            if phase == "ising" and self.parallel_executor is not None:
+                del self.parallel_executor
+                self.parallel_executor = None
+                gc.collect()        
 
             print("Epoch: {} cost time: {}".format(epoch+1, time.time()-epoch_time))
 
