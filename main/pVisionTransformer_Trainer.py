@@ -10,7 +10,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import copy
+import functools
 import gc
 import time
 import random
@@ -415,6 +415,8 @@ class pVisionTransformerTrainer:
     
     def train(self):
 
+        # At beginning of train()
+        self.parallel_executor = Parallel(n_jobs=min(8, os.cpu_count()), backend='threading')
         self.layer_inputs = {}  # Store inputs for each (model, layer) pair
     
         if self.args.ising_type == "LM_saliency_scores":
@@ -469,7 +471,7 @@ class pVisionTransformerTrainer:
                 phase = 'fine-tuning'
             self.set_current_phase(phase)
 
-            if ((phase == "ising") or ((epoch == (self.args.train_epochs-1)) and (i == (train_steps-1)))) and (self.args.ising_batch==True):
+            if ((phase == "ising") or (epoch == (self.args.train_epochs-1))) and (self.args.ising_batch==True):
                 train_data, train_loader = train_data_ising, train_loader_ising
                 vali_data, vali_loader = vali_data_ising, vali_loader_ising  
                 test_data, test_loader = test_data_ising, test_loader_ising
@@ -503,7 +505,6 @@ class pVisionTransformerTrainer:
                     
                     mask_list = []  # List to store masks for each layer in this model for the current batch
                     model = self.models[0] # Forward pass with the weight dropped
-                    original_loss = loss.item()  # Store the loss before modifying the weights
                     final_layer = model.classification_head[-1]  # Assuming all models have the same final layer'  
                     final_layer_name = "classification_head.3"  # Ensure this matches the stored key
                     weight_dropout_probs = [] # Calculate dropout probabilities for weights
@@ -529,21 +530,30 @@ class pVisionTransformerTrainer:
                     # Move model to CPU just once
                     model_cpu = clone_model_to_cpu(model, self.args, epoch_tracker=self)
                     
-                    # Execute parallel computation
-                    weight_dropout_probs = Parallel(n_jobs=-1, backend='threading')(
-                        delayed(compute_weight_dropout)(
-                            nr, nc, model_cpu, batch_x_cpu, batch_y_cpu,
-                            loss_NoDrop.item(), epsilon
-                        )
+                    # Create a partial function that "freezes" the big objects
+                    compute_weight_dropout_fixed = functools.partial(
+                        compute_weight_dropout,
+                        model=model_cpu,
+                        batch_x=batch_x_cpu,
+                        batch_y=batch_y_cpu,
+                        loss_NoDrop_item=loss_NoDrop.item(),
+                        epsilon=epsilon,
+                    )
+
+                    # Now just send nr and nc!
+                    weight_dropout_probs = self.parallel_executor(
+                        delayed(compute_weight_dropout_fixed)(nr, nc)
                         for nr, nc in indices
                     )
 
                     # Convert computed probabilities back to tensor and GPU device
                     weight_dropout_probs = torch.tensor(weight_dropout_probs).to(self.device)
-                    del model_cpu  # <<< FREE CPU CLONE after use
 
                     # Reshape dropout probabilities into mask shape
                     mask = weight_dropout_probs.view(n_rows, n_cols).detach()
+                    del weight_dropout_probs
+                    del model_cpu
+                    gc.collect()
                     
                     mask_list.append(mask) # save masks for last layer in current batch
 
@@ -739,10 +749,6 @@ class pVisionTransformerTrainer:
 
             print("Epoch: {} cost time: {}".format(epoch+1, time.time()-epoch_time))
 
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
             # Validation and early stopping          
             train_loss_avg = [np.mean(losses) for losses in train_loss]
             vali_loss_avg = [self.vali(vali_loader, criterion, model) for model in self.models]  # Pass each model
@@ -764,6 +770,11 @@ class pVisionTransformerTrainer:
             # Adjust learning rates for each optimizer
             for optimizer in model_optim:
                 adjust_learning_rate(optimizer, epoch + 1, self.args)
+
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
 
         # Save all M models separately
         for idx, model in enumerate(self.models):
