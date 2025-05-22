@@ -10,12 +10,12 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F  
 import functools
 import gc
 import time
 import random
 from torch.nn import DataParallel
-from joblib import Parallel, delayed
 from transformer_layers.bbb_ViT import VisionTransformerWithBBB
 from transformer_layers.bbb_linear import BBBLinear
 from data_loader.dataloader_master import To3Channels, get_vit_dataloaders
@@ -24,49 +24,75 @@ from utils.learning_rate import adjust_learning_rate
 from utils.metrics import metric, MAE, MSE, RMSE, MAPE, MSPE, LGLOSS, ACCRCY
 
 
-def compute_weight_dropout(nr, nc, model, batch_x, batch_y, loss_NoDrop_item, epsilon):
-    # Assumes model, batch_x, and batch_y are already on CPU
-    model.eval()
+def fast_compute_weight_dropout(final_layer, activations, targets, epsilon=1e-9, *, use_penalties=False, full_criterion=None):
 
-    final_layer = model.classification_head[-1]
-
+    """
+    Computes dropout probabilities for all weights in final linear layer
+    by simulating zeroing each weight, all in parallel.
+    """
     with torch.no_grad():
-        # Drop the specific weight
-        original_weight = final_layer.mean_weight[nr, nc].item()
-        final_layer.mean_weight[nr, nc] = 0.0
+        W = final_layer.mean_weight           # (C, D)
+        A = activations                               # (B, D)
+        logits = A @ W.T                              # (B, C)
 
-        output_dropped = model(batch_x)
-        loss_dropped = -torch.nn.functional.cross_entropy(output_dropped, batch_y)
-        loss_difference = 0.5 * (loss_NoDrop_item - loss_dropped.item()) + epsilon
-        dropout_prob = 1 - 1 / (1 + torch.exp(torch.tensor(-2 * loss_difference)))
+        if use_penalties and full_criterion is not None:
+            # one scalar total (includes penalties) – not recommended
+            loss_orig = -full_criterion(logits, targets).repeat(len(targets))
+        else:
+            # per-example CE, *no penalties* (recommended)
+            loss_orig = -F.cross_entropy(logits, targets, reduction='none')  # (B,)
 
-        # Restore the original weight (safety!)
-        final_layer.mean_weight[nr, nc] = original_weight
+        B, D = A.shape
+        C = W.shape[0]
 
-    return dropout_prob.item()
+        # Compute original class logit contributions
+        contrib = torch.einsum('bd,cd->bcd', A, W)    # (B, C, D)
 
-def clone_model_to_cpu(original_model, args, epoch_tracker=None):
-    model_cpu = VisionTransformerWithBBB(
-        img_size=args.img_size,
-        patch_size=args.patch_size,
-        num_classes=args.num_classes,
-        embed_dim=args.embed_dim,
-        num_heads=args.num_heads,
-        depth=args.depth,
-        dropout=args.dropout,
-        device=torch.device('cpu'),  # Force to CPU
-        epoch_tracker=epoch_tracker  # Pass for phase tracking if needed
-    ).float()
+        # logits[b, c] - A[b, d] * W[c, d] for each d → perturbed logits
+        logits_perturbed = logits.unsqueeze(-1) - contrib # (B, C, D)
 
-    model_cpu.load_state_dict(original_model.state_dict())
-    model_cpu.eval()
+        # We now want to compute loss for each of these perturbed logits (one for each d)
+        # logits_perturbed[b, c, d] → we want to compute CE loss using logits_perturbed[:,:,d] for each d
 
-    for param in model_cpu.parameters():
-        param.requires_grad = False
-        param.detach_()
-        param.grad = None
+        logits_perturbed = logits_perturbed.permute(2, 0, 1)  # (D, B, C)
 
-    return model_cpu
+        targets = targets.view(-1)
+        if targets.shape[0] != B:
+            raise ValueError(f"Expected targets of length {B}, got {targets.shape}")
+        loss_dropped = -F.cross_entropy(logits_perturbed.reshape(D*B, C),targets.repeat(D),reduction='none').view(D, B)        # (D, B)
+
+        # Loss difference per (d, b)
+        delta_loss = (loss_orig.unsqueeze(0) - loss_dropped)  # (D, B)
+        avg_delta = delta_loss.mean(dim=1)  # (D,)
+
+        # Broadcast to (C, D)
+        loss_diff = avg_delta.unsqueeze(0).expand(C, -1)  # (C, D)
+
+        # Dropout probability
+        dropout_prob = 1 - 1 / (1 + torch.exp(-2 * (0.5 * loss_diff + epsilon)))  # (C, D)
+
+        return dropout_prob.detach()
+
+# def compute_weight_dropout(nr, nc, model, batch_x, batch_y, loss_NoDrop_item, epsilon):
+#     # Assumes model, batch_x, and batch_y are already on CPU
+#     model.eval()
+
+#     final_layer = model.classification_head[-1]
+
+#     with torch.no_grad():
+#         # Drop the specific weight
+#         original_weight = final_layer.mean_weight[nr, nc].item()
+#         final_layer.mean_weight[nr, nc] = 0.0
+
+#         output_dropped = model(batch_x)
+#         loss_dropped = -torch.nn.functional.cross_entropy(output_dropped, batch_y)
+#         loss_difference = 0.5 * (loss_NoDrop_item - loss_dropped.item()) + epsilon
+#         dropout_prob = 1 - 1 / (1 + torch.exp(torch.tensor(-2 * loss_difference)))
+
+#         # Restore the original weight (safety!)
+#         final_layer.mean_weight[nr, nc] = original_weight
+
+#     return dropout_prob.item()
 
 def compute_diag_hessian_element(idx, grad1_flat, param, device):
     grad2 = torch.autograd.grad(
@@ -85,7 +111,6 @@ class pVisionTransformerTrainer:
         self.models = [model.to(self.device) for model in self.models]
         # Initialize epoch tracker
         self.current_epoch = 'pilot'
-        self.epoch_mask_list = []
         
     def set_current_phase(self, phase):
         """
@@ -93,13 +118,6 @@ class pVisionTransformerTrainer:
         """
         self.current_epoch = phase
         print(f"Current phase set to: {self.current_epoch}")
-
-    def _add_epoch_mask(self, mask):
-        """
-        Append a mask to the epoch mask list for the current epoch.
-        """
-        self.epoch_mask_list.append(mask)
-        print(f"Mask added for epoch '{self.current_epoch}': {mask}")
 
     def _acquire_device(self):
         if self.args.use_gpu:
@@ -419,7 +437,7 @@ class pVisionTransformerTrainer:
 
         self.layer_inputs = {}  # Store inputs for each (model, layer) pair
     
-        if self.args.ising_type == "LM_saliency_scores":
+        if self.args.ising_epochs > 0:
             def create_forward_hook(model, layer_name):
                 def forward_hook(module, input, output):
                     # Store both the input and the layer name for better tracking
@@ -494,15 +512,8 @@ class pVisionTransformerTrainer:
             epoch_time = time.time()
             batch_masks = []  # List to store masks for each model in the current batch
 
-            # After self.set_current_phase(phase)
-            if phase == "ising" and self.args.use_parallel_ising:
-                print('Launching parallelization threads...')
-                self.parallel_executor = Parallel(n_jobs=min(4, os.cpu_count()), backend='threading')
-            else:
-                self.parallel_executor = None
-
             for i, (batch_x,batch_y) in enumerate(train_loader):
-
+                
                 batch_y = batch_y.to(self.device)
                 batch_x = batch_x.to(self.device)
                 iter_count += 1
@@ -514,10 +525,16 @@ class pVisionTransformerTrainer:
                     model = self.models[0] # Forward pass with the weight dropped
                     final_layer = model.classification_head[-1]  # Assuming all models have the same final layer'  
                     final_layer_name = "classification_head.3"  # Ensure this matches the stored key
-                    weight_dropout_probs = [] # Calculate dropout probabilities for weights
-                    loss_NoDrop = -criterion(pred, batch_y) # Taking negative to convert to log likelihood instead of negative log-likelihood 
 
-                    key = (self.models[0], final_layer_name)
+                    act = self.layer_inputs[(model, final_layer_name)]   # shape [B*T, D]
+
+                    B = batch_y.size(0)           # real batch size (1 during Ising phase)
+                    T = act.size(0) // B          # number of tokens per sample
+
+                    act = act.view(B, T, -1)      # [B, T, D]
+                    act = act.mean(dim=1)         # average over tokens  -> [B, D]
+                    penultimate_act = act.detach()
+
 
                     if self.args.ising_type == "LM_saliency_scores":
                         saliency_scores = {}
@@ -527,44 +544,16 @@ class pVisionTransformerTrainer:
                         deda[final_layer_name] = 2*(grad / (input_activations + epsilon))**2  
                         saliency_scores[final_layer_name] = deda[final_layer_name].clone()
                     
-                    # Prepare inputs for parallel computation
-                    batch_x_cpu = batch_x.cpu()
-                    batch_y_cpu = batch_y.cpu()
-                    n_rows, n_cols = final_layer.mean_weight.shape
 
-                    indices = [(nr, nc) for nr in range(n_rows) for nc in range(n_cols)]
-
-                    # Move model to CPU just once
-                    model_cpu = clone_model_to_cpu(model, self.args, epoch_tracker=self)
-                    
-                    # Create a partial function that "freezes" the big objects
-                    compute_weight_dropout_fixed = functools.partial(
-                        compute_weight_dropout,
-                        model=model_cpu,
-                        batch_x=batch_x_cpu,
-                        batch_y=batch_y_cpu,
-                        loss_NoDrop_item=loss_NoDrop.item(),
-                        epsilon=epsilon,
-                    )
-
-                    if self.args.use_parallel_ising:
-
-                        weight_dropout_probs = self.parallel_executor(
-                            delayed(compute_weight_dropout_fixed)(nr, nc)
-                            for nr, nc in indices
+                    mask = fast_compute_weight_dropout(
+                            final_layer   = final_layer,       # GPU weights
+                            activations   = penultimate_act,   # GPU activations
+                            targets       = batch_y,           # GPU labels
+                            epsilon       = epsilon
                         )
-                    else:
-                        weight_dropout_probs = [compute_weight_dropout_fixed(nr, nc) for nr, nc in indices]
 
-                    # Convert computed probabilities back to tensor and GPU device, then reshape into mask shape
-                    mask = torch.tensor(weight_dropout_probs, dtype=torch.float32, device=self.device).view(n_rows, n_cols).detach()
-                    del weight_dropout_probs
-                    del model_cpu
-                    gc.collect()
-                    
-                    mask_list.append(mask) # save masks for last layer in current batch
-
-                    final_layer.apply_custom_dropout_prob(mask) # Pass the mask to the final layer for dropout
+                    mask_list.append(mask)                  # keep mask for later
+                    final_layer.apply_custom_dropout_prob(mask)
                     
                     layer = None  # Initialize variable to store the first layer
                     captured_layers = []  # List to store all layers that were already captured
@@ -692,10 +681,7 @@ class pVisionTransformerTrainer:
                         num_weights = sum(p.numel() for p in model.parameters())
                         print(f'Total num params:{num_weights}')
                         self.ising_params = total_ones
-
-                if not (self.current_epoch == 'fine-tuning' and epoch == self.args.train_epochs + self.args.ising_epochs + self.args.addtl_ft - 1):
-                    self.layer_inputs.clear()
-
+                
 
                 # Training logic (core loop)
                 for optimizer in model_optim: # Zero the gradients for each model's optimizer
@@ -736,7 +722,7 @@ class pVisionTransformerTrainer:
                                         diag_hessian.view(-1)[idx] = grad2.view(-1)[idx]
                                     
                                     # Store saliency scores
-                                    saliency_scores[name] = 0.5 * diag_hessian * (param ** 2)
+                                    saliency_scores[name] = (0.5 * diag_hessian * (param ** 2)).detach().cpu()
 
                     for optimizer in model_optim:
                         optimizer.zero_grad() # zero the gradients
@@ -750,12 +736,7 @@ class pVisionTransformerTrainer:
                     speed = (time.time() - time_now) / iter_count
                     print('\tspeed: {:.4f}s/iter'.format(speed))
                     iter_count = 0
-                    time_now = time.time()
-        
-            if phase == "ising" and self.parallel_executor is not None:
-                del self.parallel_executor
-                self.parallel_executor = None
-                gc.collect()        
+                    time_now = time.time()    
 
             print("Epoch: {} cost time: {}".format(epoch+1, time.time()-epoch_time))
 
@@ -763,9 +744,6 @@ class pVisionTransformerTrainer:
             train_loss_avg = [np.mean(losses) for losses in train_loss]
             vali_loss_avg = [self.vali(vali_loader, criterion, model) for model in self.models]  # Pass each model
             test_loss_avg = [self.vali(test_loader, criterion, model) for model in self.models]  # Pass each model
-
-            # Store the masks for this epoch in the main epoch list
-            self.epoch_mask_list.append(batch_masks)
 
             self.t_loss_tracker.append(train_loss_avg)
             self.v_loss_tracker.append(vali_loss_avg)
