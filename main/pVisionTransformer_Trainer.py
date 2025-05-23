@@ -136,6 +136,7 @@ class pVisionTransformerTrainer:
             "test_err":       None,
             "num_parameters": None,
             "ising_dropped":  None,
+            "total_potential":  None
         }
 
     def get_run_stats(self):
@@ -698,6 +699,7 @@ class pVisionTransformerTrainer:
 
                         # store for run-stats
                         self.ising_params = hard_dropped
+                        self.total_potential = num_weights
 
                 # Training logic (core loop)
                 for optimizer in model_optim: # Zero the gradients for each model's optimizer
@@ -822,6 +824,7 @@ class pVisionTransformerTrainer:
                                sum(p.numel() for p in self.models[0].parameters()))
         self._run_stats["num_parameters"] = total_params
         self._run_stats["ising_dropped"]  = getattr(self, "ising_params", 0)
+        self._run_stats["total_potential"]  = getattr(self, "total_potential", 0)
 
 
         return self.models
