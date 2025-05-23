@@ -678,15 +678,18 @@ class pVisionTransformerTrainer:
                                 
                     batch_masks.append(mask_list)
                     if (i == (train_steps-1)) and (epoch == (self.args.train_epochs+self.args.ising_epochs-1)):
-                        total_ones = 0  # Counter for total number of ones across all tensors                        
-                        for fmask in mask_list: # Loop through each tensor in the mask_list
-                            final_mask = (fmask < 0.5).int() # Apply the threshold: elements < 0.5 become 0, the rest become 1
-                            total_ones += torch.sum(final_mask).item() # Count the number of ones in the current tensor and add to the total
-                        print(f'Ising dropped params:{total_ones}')
+                        # Hard-threshold count of dropped weights (p > 0.5)
+                        hard_dropped = sum((fmask > 0.5).sum().item() for fmask in mask_list)
+                        total_masked = sum(fmask.numel() for fmask in mask_list)
+
+                        print(f"Ising hard-threshold dropped params: {hard_dropped} "
+                            f"({100 * hard_dropped / total_masked:.2f}% of {total_masked})")
+
                         num_weights = sum(p.numel() for p in model.parameters())
-                        print(f'Total num params:{num_weights}')
-                        self.ising_params = total_ones
-                
+                        print(f"Total model parameters: {num_weights}")
+
+                        # store for run-stats
+                        self.ising_params = hard_dropped
 
                 # Training logic (core loop)
                 for optimizer in model_optim: # Zero the gradients for each model's optimizer
