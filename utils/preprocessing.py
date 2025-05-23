@@ -1,3 +1,5 @@
+import torch
+
 class StandardScaler():
     def __init__(self, mean=0., std=1.):
         self.mean = mean
