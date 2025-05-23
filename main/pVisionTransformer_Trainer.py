@@ -16,6 +16,7 @@ import gc
 import time
 import random
 from torch.nn import DataParallel
+from torch.utils.data import DataLoader
 from transformer_layers.bbb_ViT import VisionTransformerWithBBB
 from transformer_layers.bbb_linear import BBBLinear
 from data_loader.dataloader_master import To3Channels, get_vit_dataloaders
@@ -127,6 +128,12 @@ class pVisionTransformerTrainer:
             "train_error":    None,   # final-epoch loss (1×M list)
             "val_error":      None,   # final-epoch loss (1×M list)
             "test_error":     None,   # final-epoch loss (1×M list)
+            "train_acc":      None,   # 
+            "val_acc":        None,   # 
+            "test_acc":       None,   # 
+            "train_err":      None,   # (100-acc)
+            "val_err":        None,
+            "test_err":       None,
             "num_parameters": None,
             "ising_dropped":  None,
         }
@@ -149,7 +156,7 @@ class pVisionTransformerTrainer:
             device = torch.device('cpu')
             print('Using CPU')
         return device
-    
+   
     def _build_model(self):
         # Build multiple ViT models if specified in args
         models = []
@@ -258,11 +265,28 @@ class pVisionTransformerTrainer:
     
         return data_set, data_loader
 
+    def _calc_accuracy(self, data_loader, model):
+        """
+        Returns accuracy (%) of `model` on `data_loader`.
+        """
+        model.eval()
+        preds, trues = [], []
+        with torch.no_grad():
+            for x, y in data_loader:
+                x, y = x.to(self.device), y.to(self.device)
+                out  = model(x)
+                preds.append(out.argmax(dim=1).cpu().numpy())
+                trues.append(y.cpu().numpy())
+        preds = np.concatenate(preds)
+        trues = np.concatenate(trues)
+        return ACCRCY(preds, trues)          
+
     def _select_optimizer(self):
         # Create a list of optimizers for each model
         model_optim = [optim.Adam(model.parameters(), lr=self.args.learning_rate, weight_decay = self.args.kl_pen) for model in self.models]
 
         return model_optim
+
     def _select_criterion(self):
 
         task_criterion = nn.CrossEntropyLoss()
@@ -807,6 +831,19 @@ class pVisionTransformerTrainer:
         self._run_stats["train_error"] = self.t_loss_tracker[-1]
         self._run_stats["val_error"]   = self.v_loss_tracker[-1]
         self._run_stats["test_error"]  = self.s_loss_tracker[-1]
+
+        # ----------  accuracy on last epoch  ----------
+        train_acc = [self._calc_accuracy(train_loader_normal, m) for m in self.models]
+        val_acc   = [self._calc_accuracy(vali_loader_normal,  m) for m in self.models]
+        test_acc  = [self._calc_accuracy(test_loader_normal,   m) for m in self.models]
+
+        self._run_stats["train_acc"] = train_acc
+        self._run_stats["val_acc"]   = val_acc
+        self._run_stats["test_acc"]  = test_acc
+
+        self._run_stats["train_err"] = [100 - a for a in train_acc]
+        self._run_stats["val_err"]   = [100 - a for a in val_acc]
+        self._run_stats["test_err"]  = [100 - a for a in test_acc]
 
         # Parameter counts & Ising statistics -----------------------------
         # `self.total_params` is set during the last Ising batch;
