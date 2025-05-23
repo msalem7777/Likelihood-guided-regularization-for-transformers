@@ -326,29 +326,6 @@ class pVisionTransformerTrainer:
 
         return criterion  
 
-    def find_out_projection(layer):
-        """
-        Recursively searches for the 'out_projection' layer within a given module.
-        Useful for locating output projection layers in Vision Transformers or other nested models.
-        
-        Args:
-            layer (torch.nn.Module): The module to search through.
-    
-        Returns:
-            torch.nn.Module or None: The 'out_projection' layer if found; otherwise, None.
-        """
-        # If the current layer has an out_projection attribute, return it
-        if hasattr(layer, 'out_projection'):
-            return layer.out_projection
-    
-        # If it's a container (e.g., Sequential, ModuleList), search its children recursively
-        for sublayer in layer.children():
-            result = find_out_projection(sublayer)
-            if result is not None:
-                return result
-    
-        # Return None if 'out_projection' is not found in this layer or its children
-        return None
 
     def vali(self, vali_loader, criterion, model):
         """
@@ -387,7 +364,7 @@ class pVisionTransformerTrainer:
         model.train()  # Switch back to training mode
         return avg_loss
 
-    def evaluate(self, save_pred=True, inverse=False, load_saved=False, return_metrics=False):
+    def evaluate(self, save_pred=True, inverse=False, return_metrics=False):
         """
         Unified function to evaluate the model(s) on the test dataset.
         
@@ -403,25 +380,7 @@ class pVisionTransformerTrainer:
         args = self.args
     
         # Load dataset and dataloader
-        if load_saved:
-            data_set = Dataset_gen(
-                root_path=args.path,
-                data_path=args.data_path,
-                flag='test',
-                size=[args.in_len, args.out_len],
-                data_split=args.data_split,
-                scale=args.scale,
-                scale_statistic=args.scale_statistic,
-            )
-            data_loader = DataLoader(
-                data_set,
-                batch_size=args.batch_size,
-                shuffle=False,
-                num_workers=args.num_workers,
-                drop_last=False,
-            )
-        else:
-            data_set, data_loader = self._get_data(flag='test')
+        data_set, data_loader = self._get_data(flag='test')
     
         accuracies_all = []  # Stores accuracy for each model
         all_preds = [[] for _ in range(self.args.num_models)]
