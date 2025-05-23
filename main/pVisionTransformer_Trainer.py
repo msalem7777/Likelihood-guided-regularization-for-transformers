@@ -472,6 +472,14 @@ class pVisionTransformerTrainer:
         path = os.path.join(self.args.checkpoints)
         if not os.path.exists(path):
             os.makedirs(path)
+        ising_tag  = self.args.ising_type if self.args.ising_epochs > 0 else "none"
+        train_size = len(train_data_normal)            # already computed
+        ckpt_base  = os.path.join(
+            path,
+            f"checkpoint_{self.args.dataset}"
+            f"_ising-{ising_tag}"
+            f"_N{train_size}"
+        )  
         
         early_stopping = EarlyStopping(patience=self.args.patience, verbose=True, num_models = self.args.num_models)
         
@@ -730,7 +738,7 @@ class pVisionTransformerTrainer:
                                         diag_hessian.view(-1)[idx] = grad2.view(-1)[idx]
                                     
                                     # Store saliency scores
-                                    saliency_scores[name] = (0.5 * diag_hessian * (param ** 2)).detach().cpu()
+                                    saliency_scores[name] = (0.5 * diag_hessian * (param ** 2)).detach()
 
                     for optimizer in model_optim:
                         optimizer.zero_grad() # zero the gradients
@@ -758,7 +766,7 @@ class pVisionTransformerTrainer:
             self.s_loss_tracker.append(test_loss_avg)
             
             print(f"Epoch: {epoch + 1}, Train Loss: {train_loss_avg}, Vali Loss: {vali_loss_avg}, Test Loss: {test_loss_avg}")
-            early_stopping(vali_loss_avg, self.models, path, phase)  # Early stopping on model[0] as reference
+            early_stopping(vali_loss_avg, self.models, ckpt_base, phase)  # Early stopping on model[0] as reference
             if early_stopping.early_stop:
                 print("Early stopping")
                 break
@@ -774,7 +782,7 @@ class pVisionTransformerTrainer:
 
         # Save all M models separately
         for idx, model in enumerate(self.models):
-            best_model_path = path + f'/checkpoint_S-BICF_model_{idx}.pth'
+            best_model_path = f"{ckpt_base}_model_{idx}.pth"
             model.load_state_dict(torch.load(best_model_path))
             state_dict = model.module.state_dict() if isinstance(model, DataParallel) else model.state_dict()
             torch.save(state_dict, best_model_path)  # Save each model's state dict     
