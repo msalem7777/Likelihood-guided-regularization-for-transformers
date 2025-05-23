@@ -106,11 +106,9 @@ class pVisionTransformerTrainer:
         self.args = args
         self.device = self._acquire_device()
         self.models = self._build_model()
-
-        # Move each model to the appropriate device
-        self.models = [model.to(self.device) for model in self.models]
-        # Initialize epoch tracker
-        self.current_epoch = 'pilot'
+        self.models = [model.to(self.device) for model in self.models]      # Move each model to the appropriate device
+        self.current_epoch = 'pilot'                                        # Initialize epoch tracker
+        self._init_run_stats()          # Experiment results tracking
         
     def set_current_phase(self, phase):
         """
@@ -118,6 +116,30 @@ class pVisionTransformerTrainer:
         """
         self.current_epoch = phase
         print(f"Current phase set to: {self.current_epoch}")
+
+    def _init_run_stats(self):
+        """Call once in __init__; prepares a blank container."""
+        self._run_stats = {
+            "dataset":        None,
+            "train_samples":  None,
+            "val_samples":    None,
+            "test_samples":   None,
+            "train_error":    None,   # final-epoch loss (1×M list)
+            "val_error":      None,   # final-epoch loss (1×M list)
+            "test_error":     None,   # final-epoch loss (1×M list)
+            "num_parameters": None,
+            "ising_dropped":  None,
+        }
+
+    def get_run_stats(self):
+        """
+        Call after `.train()`.  Returns a *copy* of the stats dict so
+        external code can’t mutate the internal version by accident.
+        """
+        if not hasattr(self, "_run_stats"):
+            raise RuntimeError("Run statistics not initialised; "
+                               "make sure .train() has completed.")
+        return self._run_stats.copy()
 
     def _acquire_device(self):
         if self.args.use_gpu:
@@ -771,6 +793,29 @@ class pVisionTransformerTrainer:
             state_dict = model.module.state_dict() if isinstance(model, DataParallel) else model.state_dict()
             torch.save(state_dict, best_model_path)  # Save each model's state dict     
         
-        
+        # ------------------------------------------------------------------
+        #                 FINALISE   R U N   S U M M A R Y
+        # ------------------------------------------------------------------
+        # Dataset & split sizes -------------------------------------------
+        self._run_stats["dataset"]       = self.args.dataset
+        self._run_stats["train_samples"] = len(train_data_normal)
+        self._run_stats["val_samples"]   = len(vali_data_normal)
+        self._run_stats["test_samples"]  = len(test_data_normal)
+
+        # Final-epoch errors (average CE losses already tracked) ----------
+        # Each entry is a list of length = num_models
+        self._run_stats["train_error"] = self.t_loss_tracker[-1]
+        self._run_stats["val_error"]   = self.v_loss_tracker[-1]
+        self._run_stats["test_error"]  = self.s_loss_tracker[-1]
+
+        # Parameter counts & Ising statistics -----------------------------
+        # `self.total_params` is set during the last Ising batch;
+        # fall back to a simple count if Ising wasn’t run.
+        total_params = getattr(self, "total_params",
+                               sum(p.numel() for p in self.models[0].parameters()))
+        self._run_stats["num_parameters"] = total_params
+        self._run_stats["ising_dropped"]  = getattr(self, "ising_params", 0)
+
+
         return self.models
 
