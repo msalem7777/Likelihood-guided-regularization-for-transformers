@@ -706,27 +706,28 @@ class pVisionTransformerTrainer:
                             for part in layer_name.split('.'):      # navigate to layer
                                 mod = mod[int(part)] if part.isdigit() else getattr(mod, part)
 
-                            mod.register_buffer("avg_dropout_mask", avg_mask.to(mod.weight.device))
+                            mod.register_buffer("avg_dropout_mask", avg_mask.to(mod.mean_weight.device))
                             mod.apply_custom_dropout_prob(mod.avg_dropout_mask)
                     
                     # ---------- Ising hard-drop summary based on final masks ----------   NEW
                     hard_dropped, total_masked = 0, 0
-                    for model in self.models:
-                        for name, module in model.named_modules():
-                            if hasattr(module, "avg_dropout_mask"):
-                                mask = module.avg_dropout_mask
-                                hard_dropped += (mask > 0.5).sum().item()
-                                total_masked += mask.numel()
+                    if self.args.ising_epochs > 0:
+                        for model in self.models:
+                            for name, module in model.named_modules():
+                                if hasattr(module, "avg_dropout_mask"):
+                                    mask = module.avg_dropout_mask
+                                    hard_dropped += (mask > 0.5).sum().item()
+                                    total_masked += mask.numel()
 
-                    print(f"Ising hard-threshold dropped params: {hard_dropped} "
-                        f"({100 * hard_dropped / total_masked:.2f}% of {total_masked})")
+                        print(f"Ising hard-threshold dropped params: {hard_dropped} "
+                            f"({100 * hard_dropped / total_masked:.2f}% of {total_masked})")
 
-                    num_weights = sum(p.numel() for p in self.models[0].parameters())
-                    print(f"Total model parameters: {num_weights}")
+                        num_weights = sum(p.numel() for p in self.models[0].parameters())
+                        print(f"Total model parameters: {num_weights}")
 
                     # Run stats
                     self.ising_params = hard_dropped
-                    self.total_potential = total_masked
+                    self.total_maskable = total_masked
 
                 # Training logic (core loop)
                 for optimizer in model_optim: # Zero the gradients for each model's optimizer
@@ -851,7 +852,7 @@ class pVisionTransformerTrainer:
                                sum(p.numel() for p in self.models[0].parameters()))
         self._run_stats["num_parameters"] = total_params
         self._run_stats["ising_dropped"]  = getattr(self, "ising_params", 0)
-        self._run_stats["total_potential"]  = getattr(self, "total_potential", 0)
+        self._run_stats["total_potential"]  = getattr(self, "total_maskable", 0)
 
 
         return self.models
