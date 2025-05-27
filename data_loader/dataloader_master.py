@@ -69,9 +69,12 @@ def get_vit_dataloaders(dataset_name, data_dir, batch_size=32, val_split=0.2, te
 
     # Calculate sizes for splitting
     total_size = len(dataset)
+    # Apply all splits as fractions of the *total* dataset
     test_size = int(total_size * test_split)
-    val_size = int((total_size - test_size) * val_split)
+    val_size  = int(total_size * val_split)
     train_size = total_size - test_size - val_size
+    assert train_size > 0, "Training set size is zero! Adjust your val/test splits."
+
 
     # Split the dataset
     train_dataset, val_dataset, test_dataset = random_split(dataset, [train_size, val_size, test_size])
