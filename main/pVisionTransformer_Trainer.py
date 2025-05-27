@@ -444,6 +444,7 @@ class pVisionTransformerTrainer:
 
         self.layer_inputs = {}  # Store inputs for each (model, layer) pair
         self._mask_history = defaultdict(list)   # layer_name ➜ [mask₁, …, maskₙ] (n≤100)
+        avgd_masks = 0
     
         if self.args.ising_epochs > 0:
             def create_forward_hook(model, layer_name):
@@ -691,7 +692,41 @@ class pVisionTransformerTrainer:
                         hist.append(lmask.detach().cpu())      # store on CPU
                         if len(hist) > 100:                    # clamp length
                             hist.pop(0)            
+                
+                # Handle Ising phase-specific computations
+                if phase == 'fine-tuning' and avgd_masks == 0:
+                    avgd_masks = 1
+                    for layer_name, masks in self._mask_history.items():
+                        if not masks:                 # skip layers with no history
+                            continue
+                        avg_mask = torch.stack(masks).mean(0)
 
+                        for model in self.models:
+                            mod = model
+                            for part in layer_name.split('.'):      # navigate to layer
+                                mod = mod[int(part)] if part.isdigit() else getattr(mod, part)
+
+                            mod.register_buffer("avg_dropout_mask", avg_mask.to(mod.weight.device))
+                            mod.apply_custom_dropout_prob(mod.avg_dropout_mask)
+                    
+                    # ---------- Ising hard-drop summary based on final masks ----------   NEW
+                    hard_dropped, total_masked = 0, 0
+                    for model in self.models:
+                        for name, module in model.named_modules():
+                            if hasattr(module, "avg_dropout_mask"):
+                                mask = module.avg_dropout_mask
+                                hard_dropped += (mask > 0.5).sum().item()
+                                total_masked += mask.numel()
+
+                    print(f"Ising hard-threshold dropped params: {hard_dropped} "
+                        f"({100 * hard_dropped / total_masked:.2f}% of {total_masked})")
+
+                    num_weights = sum(p.numel() for p in self.models[0].parameters())
+                    print(f"Total model parameters: {num_weights}")
+
+                    # Run stats
+                    self.ising_params = hard_dropped
+                    self.total_potential = total_masked
 
                 # Training logic (core loop)
                 for optimizer in model_optim: # Zero the gradients for each model's optimizer
@@ -773,38 +808,6 @@ class pVisionTransformerTrainer:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             gc.collect()
-
-        for layer_name, masks in self._mask_history.items():
-            if not masks:                 # skip layers with no history
-                continue
-            avg_mask = torch.stack(masks).mean(0)
-
-            for model in self.models:
-                mod = model
-                for part in layer_name.split('.'):      # navigate to layer
-                    mod = mod[int(part)] if part.isdigit() else getattr(mod, part)
-
-                mod.register_buffer("avg_dropout_mask", avg_mask.to(mod.weight.device))
-                mod.apply_custom_dropout_prob(mod.avg_dropout_mask)
-        
-        # ---------- Ising hard-drop summary based on final masks ----------   NEW
-        hard_dropped, total_masked = 0, 0
-        for model in self.models:
-            for name, module in model.named_modules():
-                if hasattr(module, "avg_dropout_mask"):
-                    mask = module.avg_dropout_mask
-                    hard_dropped += (mask > 0.5).sum().item()
-                    total_masked += mask.numel()
-
-        print(f"Ising hard-threshold dropped params: {hard_dropped} "
-            f"({100 * hard_dropped / total_masked:.2f}% of {total_masked})")
-
-        num_weights = sum(p.numel() for p in self.models[0].parameters())
-        print(f"Total model parameters: {num_weights}")
-
-        # Run stats
-        self.ising_params = hard_dropped
-        self.total_potential = total_masked
 
         # Save all M models separately
         for idx, model in enumerate(self.models):
