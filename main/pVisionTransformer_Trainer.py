@@ -556,7 +556,7 @@ class pVisionTransformerTrainer:
                         grad = final_layer.mean_weight.grad  # Already computed during backprop
                         input_activations = self.layer_inputs[(self.models[0], final_layer_name)].mean(dim=0)
                         deda[final_layer_name] = 2*(grad / (input_activations + epsilon))**2  
-                        saliency_scores[final_layer_name] = deda[final_layer_name].clone()
+                        saliency_scores[final_layer_name] = deda[final_layer_name].clone().detach()
                     
 
                     mask = fast_compute_weight_dropout(
@@ -651,7 +651,7 @@ class pVisionTransformerTrainer:
                                     deda[next_layer_name] = (curr_param.grad / (input_activations + 1e-8))**2  # Compute deda for the current layer
                                     # Propagate deda by weighting with the square of next layer's weights
                                     deda[next_layer_name] = torch.matmul(deda[next_layer_name].T, torch.matmul(prev_param.T ** 2, deda[layer_name])).T 
-                                    saliency_score = 0.5 * deda[next_layer_name].clone() * (curr_param ** 2)
+                                    saliency_score = 0.5 * deda[next_layer_name].clone().detach() * (curr_param ** 2)
 
                                 elif self.args.ising_type == "no_saliency_scores":
                                     L1_mat = torch.sum(L_minus_1_connec, dim=1).unsqueeze(0).repeat(num_rows, 1)
@@ -686,6 +686,9 @@ class pVisionTransformerTrainer:
                                 layer_counter += 1
                                 
                     batch_masks.append(mask_list)
+                    if len(batch_masks) > 100: # Keep only last 100 masks to prevent memory leaks
+                        batch_masks.pop(0)
+
                     if (i == (train_steps-1)) and (epoch == (self.args.train_epochs+self.args.ising_epochs-1)):
                         # Hard-threshold count of dropped weights (p > 0.5)
                         hard_dropped = sum((fmask > 0.5).sum().item() for fmask in mask_list)
@@ -699,7 +702,7 @@ class pVisionTransformerTrainer:
 
                         # store for run-stats
                         self.ising_params = hard_dropped
-                        self.total_potential = num_weights
+                        self.total_potential = total_masked
 
                 # Training logic (core loop)
                 for optimizer in model_optim: # Zero the gradients for each model's optimizer
