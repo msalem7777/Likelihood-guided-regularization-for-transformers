@@ -75,27 +75,6 @@ def fast_compute_weight_dropout(final_layer, activations, targets, epsilon=1e-9,
 
         return dropout_prob.detach()
 
-# def compute_weight_dropout(nr, nc, model, batch_x, batch_y, loss_NoDrop_item, epsilon):
-#     # Assumes model, batch_x, and batch_y are already on CPU
-#     model.eval()
-
-#     final_layer = model.classification_head[-1]
-
-#     with torch.no_grad():
-#         # Drop the specific weight
-#         original_weight = final_layer.mean_weight[nr, nc].item()
-#         final_layer.mean_weight[nr, nc] = 0.0
-
-#         output_dropped = model(batch_x)
-#         loss_dropped = -torch.nn.functional.cross_entropy(output_dropped, batch_y)
-#         loss_difference = 0.5 * (loss_NoDrop_item - loss_dropped.item()) + epsilon
-#         dropout_prob = 1 - 1 / (1 + torch.exp(torch.tensor(-2 * loss_difference)))
-
-#         # Restore the original weight (safety!)
-#         final_layer.mean_weight[nr, nc] = original_weight
-
-#     return dropout_prob.item()
-
 def compute_diag_hessian_element(idx, grad1_flat, param, device):
     grad2 = torch.autograd.grad(
         grad1_flat[idx], param, retain_graph=True
@@ -539,18 +518,18 @@ class pVisionTransformerTrainer:
 
                     mask_list = []  # List to store masks for each layer in this model for the current batch
                     model = self.models[0] # Forward pass with the weight dropped
+                    pred = model(batch_x)
                     final_layer = model.classification_head[-1]  # Assuming all models have the same final layer'  
                     final_layer_name = "classification_head.3"  # Ensure this matches the stored key
 
                     act = self.layer_inputs[(model, final_layer_name)]   # shape [B*T, D]
 
-                    B = batch_y.size(0)           # real batch size (1 during Ising phase)
-                    T = act.size(0) // B          # number of tokens per sample
+                    # B = batch_y.size(0)           # real batch size (1 during Ising phase)
+                    # T = act.size(0) // B          # number of tokens per sample
+                    # act = act.view(B, T, -1)      # [B, T, D]
+                    # act = act.mean(dim=1)         # average over tokens  -> [B, D]
 
-                    act = act.view(B, T, -1)      # [B, T, D]
-                    act = act.mean(dim=1)         # average over tokens  -> [B, D]
                     penultimate_act = act.detach()
-
 
                     if self.args.ising_type == "LM_saliency_scores":
                         saliency_scores = {}
