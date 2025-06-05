@@ -88,7 +88,7 @@ class BBBLinear(nn.Module):
                 
             else:
                 # Create a binary mask to apply DropConnect (randomly keep or "drop" weights)
-                binary_mask = 1 - torch.bernoulli(torch.full_like(self.custom_mask_prob, self.p))
+                binary_mask = 1 - torch.bernoulli(torch.full_like(self.mean_weight, self.p))
                 mask = torch.bernoulli(torch.full(self.mean_weight.shape, 1 - self.p)).to(device)
                 weight = (self.mean_weight + std_weight * torch.randn_like(self.mean_weight, device=device)) * mask + sampled_weights * (1 - mask)        
                 
