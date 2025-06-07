@@ -680,7 +680,7 @@ class VisionTransformerTrainer:
                         avg_mask = torch.stack(masks).mean(0)
 
                         # Threshold to binary mask at 0.5
-                        binary_mask = (avg_mask > 0.5).float()
+                        binary_mask = (avg_mask > self.args.drop_thresh).float()
 
                         for model in self.models:
                             mod = model
