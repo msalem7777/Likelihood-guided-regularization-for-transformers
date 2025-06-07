@@ -32,8 +32,8 @@ class EarlyStopping:
 
         if self.disable:
             for idx, (vl, model) in enumerate(zip(val_loss, models)):
-                self.save_checkpoint(vl, model, path, idx, self.val_loss_mins[idx])
-            return  # skip patience logic entirely
+                self.save_checkpoint(vl, model, path, idx, self.val_loss_mins[idx], force_save=True)
+            return
 
         # Track if any model has improved
         any_model_improved = False
@@ -69,9 +69,9 @@ class EarlyStopping:
             if self.counter >= self.patience:
                 self.early_stop = True
 
-    def save_checkpoint(self, val_loss, model, path, model_idx, old_val_loss):
+    def save_checkpoint(self, val_loss, model, path, model_idx, old_val_loss, force_save=False):
         if self.verbose:
-            if self.disable:
+            if force_save:
                 print(f'Model {model_idx}: Validation loss change ({old_val_loss:.6f} --> {val_loss:.6f}).  Early stopping disabled. Saving model.')
             else:
                 print(f'Model {model_idx}: Validation loss decreased ({old_val_loss:.6f} --> {val_loss:.6f}).  Saving model ...')
