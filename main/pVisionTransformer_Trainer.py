@@ -35,43 +35,42 @@ def fast_compute_weight_dropout(final_layer, activations, targets, epsilon=1e-9,
     with torch.no_grad():
         W = final_layer.mean_weight           # (C, D)
         A = activations                               # (B, D)
+        B, D = A.shape
+        C = W.shape[0]
+
         logits = A @ W.T                              # (B, C)
 
         if use_penalties and full_criterion is not None:
             # one scalar total (includes penalties) – not recommended
-            loss_orig = -full_criterion(logits, targets).repeat(len(targets))
+            loss_orig = -full_criterion(logits, targets).repeat(len(targets)) # (B,)
         else:
             # per-example CE, *no penalties* (recommended)
             loss_orig = -F.cross_entropy(logits, targets, reduction='none')  # (B,)
-
-        B, D = A.shape
-        C = W.shape[0]
 
         # Compute original class logit contributions
         contrib = torch.einsum('bd,cd->bcd', A, W)    # (B, C, D)
 
         # logits[b, c] - A[b, d] * W[c, d] for each d → perturbed logits
-        logits_perturbed = logits.unsqueeze(-1) - contrib # (B, C, D)
+        logits_exp = logits.unsqueeze(1).unsqueeze(2)         # (B, 1, 1, C)
+        logits_exp = logits_exp.expand(-1, C, D, -1)          # (B, C, D, C)
+        eye   = torch.eye(C, device=W.device).view(1, C, 1, C) # eye : (1, C, 1, C) – broadcast helper
 
-        # We now want to compute loss for each of these perturbed logits (one for each d)
-        # logits_perturbed[b, c, d] → we want to compute CE loss using logits_perturbed[:,:,d] for each d
+        delta = contrib.unsqueeze(-1) * eye                   # (B, C, D, C)
+        logits_perturbed_full = logits_exp - delta            # (B, C, D, C)
 
-        logits_perturbed = logits_perturbed.permute(2, 0, 1)  # (D, B, C)
+        logits_flat  = logits_perturbed_full.reshape(B * C * D, C) # (B*C*D, C)
 
-        targets = targets.view(-1)
-        if targets.shape[0] != B:
-            raise ValueError(f"Expected targets of length {B}, got {targets.shape}")
-        loss_dropped = -F.cross_entropy(logits_perturbed.reshape(D*B, C),targets.repeat(D),reduction='none').view(D, B)        # (D, B)
+        targets_flat  = targets.view(B, 1, 1).expand(-1, C, D).reshape(-1)  # (B*C*D,)
 
+        loss_dropped  = -F.cross_entropy(logits_flat, targets_flat, reduction='none')                  # (B*C*D,)
+        loss_dropped  = loss_dropped.view(B, C, D)                          # (B, C, D) 
+        
         # Loss difference per (d, b)
-        delta_loss = (loss_orig.unsqueeze(0) - loss_dropped)  # (D, B)
-        avg_delta = delta_loss.mean(dim=1)  # (D,)
+        delta_loss = loss_orig.view(B, 1, 1) - loss_dropped                 # (B, C, D)
+        avg_delta  = delta_loss.mean(dim=0)                                 # (C, D)
+        loss_diff = avg_delta                                              # (C, D)
 
-        # Broadcast to (C, D)
-        loss_diff = avg_delta.unsqueeze(0).expand(C, -1)  # (C, D)
-
-        # Dropout probability
-        dropout_prob = 1 - 1 / (1 + torch.exp(-2 * (0.5 * loss_diff + epsilon)))  # (C, D)
+        dropout_prob = 1 - 1 / (1 + torch.exp(-2 * (0.5 * loss_diff) + 0))  # (C, D)
 
         return dropout_prob.detach()
 
