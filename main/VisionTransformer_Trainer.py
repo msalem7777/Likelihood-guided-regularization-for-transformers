@@ -679,12 +679,15 @@ class VisionTransformerTrainer:
                             continue
                         avg_mask = torch.stack(masks).mean(0)
 
+                        # Threshold to binary mask at 0.5
+                        binary_mask = (avg_mask > 0.5).float()
+
                         for model in self.models:
                             mod = model
                             for part in layer_name.split('.'):      # navigate to layer
                                 mod = mod[int(part)] if part.isdigit() else getattr(mod, part)
 
-                            mod.register_buffer("avg_dropout_mask", avg_mask.to(mod.mean_weight.device))
+                            mod.register_buffer("avg_dropout_mask", binary_mask.to(mod.mean_weight.device))
                             mod.apply_custom_dropout_prob(mod.avg_dropout_mask)
                     
                     # ---------- Ising hard-drop summary based on final masks ----------   NEW
