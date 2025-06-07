@@ -80,7 +80,7 @@ def compute_diag_hessian_element(idx, grad1_flat, param, device):
     )[0]
     return grad2.view(-1)[idx].item()
 
-class pVisionTransformerTrainer:
+class VisionTransformerTrainer:
 
     def __init__(self, args):
         self.args = args
