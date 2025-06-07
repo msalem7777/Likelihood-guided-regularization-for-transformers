@@ -2,7 +2,7 @@ import numpy as np
 import torch
 
 class EarlyStopping:
-    def __init__(self, patience=7, verbose=False, delta=0, num_models=1):
+    def __init__(self, patience=7, verbose=False, delta=0, num_models=1, disable=False):
         self.patience = patience
         self.verbose = verbose
         self.delta = delta
@@ -12,8 +12,14 @@ class EarlyStopping:
         self.best_scores = [None] * num_models
         self.val_loss_mins = [np.inf] * num_models
         self.phase = None
+        self.disable = disable
 
     def __call__(self, val_loss, models, path, phase=None):
+
+        if self.disable:
+        # No-op if early stopping is disabled
+            return
+
         if phase and phase != getattr(self, "phase", None):
             print(f"🔁 Phase changed from {getattr(self, 'phase', 'None')} → {phase}")
             if phase == "fine-tuning":
