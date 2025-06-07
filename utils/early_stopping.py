@@ -7,18 +7,15 @@ class EarlyStopping:
         self.verbose = verbose
         self.delta = delta
         self.num_models = num_models
+        self.disable = disable
         self.counter = 0
         self.early_stop = False
         self.best_scores = [None] * num_models
         self.val_loss_mins = [np.inf] * num_models
         self.phase = None
-        self.disable = disable
+        
 
     def __call__(self, val_loss, models, path, phase=None):
-
-        if self.disable:
-        # No-op if early stopping is disabled
-            return
 
         if phase and phase != getattr(self, "phase", None):
             print(f"🔁 Phase changed from {getattr(self, 'phase', 'None')} → {phase}")
@@ -33,12 +30,18 @@ class EarlyStopping:
         if isinstance(val_loss, (int, float)):
             val_loss = [val_loss]  # Convert scalar to list
 
+        if self.disable:
+            for idx, (vl, model) in enumerate(zip(val_loss, models)):
+                self.save_checkpoint(vl, model, path, idx, self.val_loss_mins[idx])
+            return  # skip patience logic entirely
+
         # Track if any model has improved
         any_model_improved = False
         
         for model_idx in range(self.num_models):
             score = -val_loss[model_idx]
             old_val_loss = self.val_loss_mins[model_idx]  # Fetch previous best loss
+            
             if self.best_scores[model_idx] is None:
                 self.best_scores[model_idx] = score
                 self.val_loss_mins[model_idx] = val_loss[model_idx]
