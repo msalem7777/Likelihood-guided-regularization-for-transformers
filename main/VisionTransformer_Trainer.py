@@ -114,6 +114,7 @@ class VisionTransformerTrainer:
             "val_err":        None,
             "test_err":       None,
             "num_parameters": None,
+            "ising_expected_dropped":  None,
             "ising_dropped":  None,
             "total_potential":  None
         }
@@ -687,18 +688,22 @@ class VisionTransformerTrainer:
                             for part in layer_name.split('.'):      # navigate to layer
                                 mod = mod[int(part)] if part.isdigit() else getattr(mod, part)
 
-                            mod.register_buffer("avg_dropout_mask", binary_mask.to(mod.mean_weight.device))
+                            mod.register_buffer("avg_dropout_mask", avg_mask.to(mod.mean_weight.device))
                             mod.apply_custom_dropout_prob(mod.avg_dropout_mask)
                     
                     # ---------- Ising hard-drop summary based on final masks ----------   NEW
-                    hard_dropped, total_masked = 0, 0
+                    expec_dropped, hard_dropped, total_masked = 0, 0, 0
                     if self.args.ising_epochs > 0:
                         for model in self.models:
                             for name, module in model.named_modules():
                                 if hasattr(module, "avg_dropout_mask"):
                                     mask = module.avg_dropout_mask
-                                    hard_dropped += (mask > 0.5).sum().item()
+                                    expec_dropped += (mask > 0.5).sum().item()
+                                    hard_dropped += (mask > self.args.drop_thresh).sum().item()
                                     total_masked += mask.numel()
+
+                        print(f"Ising expected dropped params: {expec_dropped} "
+                            f"({100 * expec_dropped / total_masked:.2f}% of {total_masked})")
 
                         print(f"Ising hard-threshold dropped params: {hard_dropped} "
                             f"({100 * hard_dropped / total_masked:.2f}% of {total_masked})")
@@ -707,6 +712,7 @@ class VisionTransformerTrainer:
                         print(f"Total model parameters: {num_weights}")
 
                     # Run stats
+                    self.ising_expec_params = expec_dropped
                     self.ising_params = hard_dropped
                     self.total_maskable = total_masked
 
@@ -832,6 +838,7 @@ class VisionTransformerTrainer:
         total_params = getattr(self, "total_params",
                                sum(p.numel() for p in self.models[0].parameters()))
         self._run_stats["num_parameters"] = total_params
+        self._run_stats["ising_expected_dropped"]  = getattr(self, "ising_expec_params", 0)
         self._run_stats["ising_dropped"]  = getattr(self, "ising_params", 0)
         self._run_stats["total_potential"]  = getattr(self, "total_maskable", 0)
 
