@@ -84,7 +84,10 @@ class BBBLinear(nn.Module):
                 # Apply the custom mask (if provided) to the mean_weight
                 binary_mask = 1-torch.bernoulli(self.custom_mask_prob.to(device).view(self.custom_mask_prob.shape))
                 prob_mask = 1-self.custom_mask_prob.to(device)
-                weight = (self.mean_weight + std_weight * torch.randn_like(self.mean_weight, device=device)) * prob_mask + sampled_weights * (1 - prob_mask)
+                if current_epoch == "fine-tuning":
+                    weight = (self.mean_weight + std_weight * torch.randn_like(self.mean_weight, device=device)) * prob_mask + sampled_weights * (1 - prob_mask)
+                else:
+                    weight = (self.mean_weight + std_weight * torch.randn_like(self.mean_weight, device=device)) * binary_mask + sampled_weights * (1 - binary_mask)
                 
             else:
                 # Create a binary mask to apply DropConnect (randomly keep or "drop" weights)
