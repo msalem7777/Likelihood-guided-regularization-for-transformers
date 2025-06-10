@@ -10,7 +10,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, dim, heads, dropout=0.1):
+    def __init__(self, dim, heads, dropout=0.0):
         super(MultiHeadAttention, self).__init__()
         
         self.dim = dim
@@ -64,7 +64,7 @@ class MultiHeadAttention(nn.Module):
         return out
 
 class TransformerEncoderLayerWithBBB(nn.Module):
-    def __init__(self, embed_dim, num_heads, mlp_ratio=4.0, dropout=0.0, device=torch.device("cuda" if torch.cuda.is_available() else "cpu")):
+    def __init__(self, embed_dim, num_heads, mlp_ratio=16.0, dropout=0.0, device=torch.device("cuda" if torch.cuda.is_available() else "cpu")):
         super(TransformerEncoderLayerWithBBB, self).__init__()
 
         self.norm1 = nn.LayerNorm(embed_dim)
@@ -102,7 +102,7 @@ class VisionTransformerWithBBB(nn.Module):
         embed_dim,
         depth,
         num_heads,
-        mlp_ratio=4.0,
+        mlp_ratio=16.0,
         dropout=0.0,
         device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
         epoch_tracker=None
