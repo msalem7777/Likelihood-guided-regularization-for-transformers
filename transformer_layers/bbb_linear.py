@@ -82,13 +82,27 @@ class BBBLinear(nn.Module):
 
             if self.custom_mask_prob is not None:
                 # Apply the custom mask (if provided) to the mean_weight
+
+                p = self.custom_mask_prob
+                if not torch.all(torch.isfinite(p)):
+                    print(p)
+                    raise RuntimeError("❌ custom_mask_prob contains NaNs or Infs")
+
+                m_min, m_max, m_mean = p.min().item(), p.max().item(), p.mean().item()
+                print(f"[Mask Check] mask ∈ [{m_min:.4f}, {m_max:.4f}], mean = {m_mean:.4f}")
+
+                if m_mean > 0.99:
+                    print("⚠️ Mask is nearly all 1s — might be dropping everything")
+                elif m_mean < 0.01:
+                    print("⚠️ Mask is nearly all 0s — might be keeping everything")
+
                 binary_mask = 1-torch.bernoulli(self.custom_mask_prob.to(device).view(self.custom_mask_prob.shape))
                 prob_mask = 1-self.custom_mask_prob.to(device)
                 if current_epoch == "fine-tuning":
                     weight = (self.mean_weight + std_weight * torch.randn_like(self.mean_weight, device=device)) * prob_mask + sampled_weights * (1 - prob_mask)
                 else:
                     weight = (self.mean_weight + std_weight * torch.randn_like(self.mean_weight, device=device)) * binary_mask + sampled_weights * (1 - binary_mask)
-                
+
             else:
                 # Create a binary mask to apply DropConnect (randomly keep or "drop" weights)
                 binary_mask = 1 - torch.bernoulli(torch.full_like(self.mean_weight, self.p))
