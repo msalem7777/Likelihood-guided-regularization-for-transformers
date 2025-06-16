@@ -89,7 +89,7 @@ class BBBLinear(nn.Module):
                     raise RuntimeError("❌ custom_mask_prob contains NaNs or Infs")
 
                 m_min, m_max, m_mean = p.min().item(), p.max().item(), p.mean().item()
-                print(f"[Mask Check] mask ∈ [{m_min:.4f}, {m_max:.4f}], mean = {m_mean:.4f}")
+                # print(f"[Mask Check] mask ∈ [{m_min:.4f}, {m_max:.4f}], mean = {m_mean:.4f}")
 
                 if m_mean > 0.99:
                     print("⚠️ Mask is nearly all 1s — might be dropping everything")
