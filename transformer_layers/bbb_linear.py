@@ -106,20 +106,22 @@ class BBBLinear(nn.Module):
             else:
                 # Create a binary mask to apply DropConnect (randomly keep or "drop" weights)
                 binary_mask = 1 - torch.bernoulli(torch.full_like(self.mean_weight, self.p))
-                mask = torch.bernoulli(torch.full(self.mean_weight.shape, 1 - self.p)).to(device)
-                weight = (self.mean_weight + std_weight * torch.randn_like(self.mean_weight, device=device)) * mask + sampled_weights * (1 - mask)        
-                
+                prob_mask = 1-self.p
+                if current_epoch == "fine-tuning":
+                    weight = (self.mean_weight + std_weight * torch.randn_like(self.mean_weight, device=device)) * prob_mask + sampled_weights * (1 - prob_mask)        
+                else:
+                    weight = (self.mean_weight + std_weight * torch.randn_like(self.mean_weight, device=device)) * binary_mask + sampled_weights * (1 - binary_mask)        
         else:
             # In evaluation mode, use weighted means
-            mvn_0 = torch.normal(0, std_weight).to(device)
-            mvn_M = self.mean_weight + std_weight * torch.randn_like(self.mean_weight, device=device)
+            # mvn_0 = torch.normal(0, std_weight).to(device)
+            # mvn_M = self.mean_weight + std_weight * torch.randn_like(self.mean_weight, device=device)
         
             # Apply custom mask during evaluation if available
             if self.custom_mask_prob is not None:
-                weight =  (1 - self.custom_mask_prob.to(device)) * mvn_M
+                weight =  (1 - self.custom_mask_prob.to(device)) * self.mean_weight
             else:
              # Weighted sum based on p
-                weight = (1 - self.p) * mvn_M   
+                weight = (1 - self.p) * self.mean_weight   
 
         # Handle bias similarly
         if self.mean_bias is not None:
