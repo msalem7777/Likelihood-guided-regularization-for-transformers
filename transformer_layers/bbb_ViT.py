@@ -10,7 +10,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, dim, heads, dropout=0.0):
+    def __init__(self, dim, heads, dropout=0.0, dropconnect = 0.0):
         super(MultiHeadAttention, self).__init__()
         
         self.dim = dim
@@ -21,12 +21,12 @@ class MultiHeadAttention(nn.Module):
         assert self.head_dim * heads == dim, "Embedding dimension must be divisible by number of heads"
         
         # Linear layers for queries, keys, and values (using BBBLinear)
-        self.query = BBBLinear(dim, dim)
-        self.key = BBBLinear(dim, dim)
-        self.value = BBBLinear(dim, dim)
+        self.query = BBBLinear(dim, dim, p = dropconnect)
+        self.key = BBBLinear(dim, dim, p = dropconnect)
+        self.value = BBBLinear(dim, dim, p = dropconnect)
         
         # Output linear layer (using BBBLinear)
-        self.out_projection = BBBLinear(dim, dim)
+        self.out_projection = BBBLinear(dim, dim, p = dropconnect)
         
         # Dropout layer
         self.dropout = nn.Dropout(dropout)
@@ -64,27 +64,27 @@ class MultiHeadAttention(nn.Module):
         return out
 
 class TransformerEncoderLayerWithBBB(nn.Module):
-    def __init__(self, embed_dim, num_heads, mlp_ratio=16.0, dropout=0.0, device=torch.device("cuda" if torch.cuda.is_available() else "cpu")):
+    def __init__(self, embed_dim, num_heads, mlp_ratio=16.0, dropout=0.0, dropconnect = 0.0, device=torch.device("cuda" if torch.cuda.is_available() else "cpu")):
         super(TransformerEncoderLayerWithBBB, self).__init__()
 
         self.norm1 = nn.LayerNorm(embed_dim)
         
-        self.self_attn = nn.MultiheadAttention(embed_dim, num_heads, dropout=dropout, batch_first=True)
+        self.self_attn = MultiHeadAttention(embed_dim, num_heads, dropout=dropout, dropconnect=dropconnect)
 
         self.norm2 = nn.LayerNorm(embed_dim)
         
         self.mlp = nn.Sequential(
-            BBBLinear(embed_dim, int(embed_dim * mlp_ratio)),
+            BBBLinear(embed_dim, int(embed_dim * mlp_ratio), p = dropconnect),
             nn.GELU(),
             nn.Dropout(dropout),
-            BBBLinear(int(embed_dim * mlp_ratio), embed_dim),
+            BBBLinear(int(embed_dim * mlp_ratio), embed_dim, p = dropconnect),
             nn.Dropout(dropout),
         )
 
     def forward(self, x):
         # PRE-LayerNorm for Attention
         x_norm = self.norm1(x)
-        attn_output, _ = self.self_attn(x_norm, x_norm, x_norm)
+        attn_output = self.self_attn(x_norm, x_norm, x_norm)
         x = x + attn_output  # Residual connection
 
         # PRE-LayerNorm for MLP
@@ -104,6 +104,7 @@ class VisionTransformerWithBBB(nn.Module):
         num_heads,
         mlp_ratio=16.0,
         dropout=0.0,
+        dropconnect=0.0,
         device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
         epoch_tracker=None
     ):
@@ -118,13 +119,13 @@ class VisionTransformerWithBBB(nn.Module):
         self.epoch_tracker = epoch_tracker
 
         # Patch Embedding Layer
-        self.patch_embedding = BBBLinear(3 * patch_size * patch_size, embed_dim)
+        self.patch_embedding = BBBLinear(3 * patch_size * patch_size, embed_dim, p = dropconnect)
 
         # Transformer Encoder
         self.encoder = nn.ModuleList(
             [
                 TransformerEncoderLayerWithBBB(
-                    embed_dim, num_heads, mlp_ratio, dropout, device=device
+                    embed_dim, num_heads, mlp_ratio, dropout, dropconnect, device=device
                 )
                 for _ in range(depth)
             ]
@@ -132,10 +133,10 @@ class VisionTransformerWithBBB(nn.Module):
 
         # Classification Head
         self.classification_head = nn.Sequential(
-            BBBLinear(embed_dim, embed_dim // 2),
+            BBBLinear(embed_dim, embed_dim // 2, p = dropconnect),
             nn.ReLU(),
             nn.Dropout(dropout),
-            BBBLinear(embed_dim // 2, num_classes),
+            BBBLinear(embed_dim // 2, num_classes, p = dropconnect),
         )
 
     def forward(self, x):
