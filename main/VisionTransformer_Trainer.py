@@ -150,6 +150,7 @@ class VisionTransformerTrainer:
                 num_heads=self.args.num_heads,
                 depth=self.args.depth,
                 dropout=self.args.dropout,
+                dropconnect=self.args.dropconnect,
                 device=self.device,
                 epoch_tracker=self,  # Pass the instance for epoch tracking
             ).float()
@@ -675,6 +676,7 @@ class VisionTransformerTrainer:
                 # Handle Ising phase-specific computations
                 if phase == 'fine-tuning' and avgd_masks == 0:
                     avgd_masks = 1
+
                     for layer_name, masks in self._mask_history.items():
                         if not masks:                 # skip layers with no history
                             continue
