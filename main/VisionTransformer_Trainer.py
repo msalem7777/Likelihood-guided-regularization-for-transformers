@@ -152,7 +152,6 @@ class VisionTransformerTrainer:
                 depth=self.args.depth,
                 dropout=self.args.dropout,
                 dropconnect=self.args.dropconnect,
-                dropconnect_delta = self.args.dropconnect_delta,
                 device=self.device,
                 epoch_tracker=self,  # Pass the instance for epoch tracking
             ).float()
