@@ -26,7 +26,7 @@ from utils.learning_rate import adjust_learning_rate
 from utils.metrics import metric, MAE, MSE, RMSE, MAPE, MSPE, LGLOSS, ACCRCY
 
 
-def fast_compute_weight_dropout(final_layer, activations, targets, epsilon=1e-9, *, use_penalties=False, full_criterion=None):
+def fast_compute_weight_dropout(final_layer, activations, targets, dropconnect_delta = 0.5, epsilon=1e-9, *, use_penalties=False, full_criterion=None):
 
     """
     Computes dropout probabilities for all weights in final linear layer
@@ -70,7 +70,8 @@ def fast_compute_weight_dropout(final_layer, activations, targets, epsilon=1e-9,
         avg_delta  = delta_loss.mean(dim=0)                                 # (C, D)
         loss_diff = avg_delta                                              # (C, D)
 
-        dropout_prob = 1 - 1 / (1 + torch.exp(-2 * (0.5 * loss_diff) + 0))  # (C, D)
+        delta = torch.log(dropconnect_delta/(1-dropconnect_delta))              # External Field
+        dropout_prob = 1 - 1 / (1 + torch.exp(-2 * (0.5 * loss_diff) + delta))  # (C, D)
 
         return dropout_prob.detach()
 
@@ -151,6 +152,7 @@ class VisionTransformerTrainer:
                 depth=self.args.depth,
                 dropout=self.args.dropout,
                 dropconnect=self.args.dropconnect,
+                dropconnect_delta = self.args.dropconnect_delta,
                 device=self.device,
                 epoch_tracker=self,  # Pass the instance for epoch tracking
             ).float()
@@ -545,6 +547,7 @@ class VisionTransformerTrainer:
                             final_layer   = final_layer,       # GPU weights
                             activations   = penultimate_act,   # GPU activations
                             targets       = batch_y,           # GPU labels
+                            dropconnect_delta = self.args.dropconnect_delta,    # External Field Parameter
                             epsilon       = epsilon
                         )
 
@@ -640,7 +643,7 @@ class VisionTransformerTrainer:
                                     saliency_score = torch.zeros_like(L1_mat.t())
                                     
                                 a_i_tensor = torch.sum(L_minus_1_connec, dim=1).unsqueeze(0).repeat(num_rows, 1) + 0.5*saliency_score.t()
-                                L_minus_1_dropout_probs = 1 - 1 / (1 + torch.exp(-2 * a_i_tensor))
+                                L_minus_1_dropout_probs = 1 - 1 / (1 + torch.exp(-2 * a_i_tensor + torch.log(self.args.dropconnect_delta/(1-self.args.dropconnect_delta))))
                                 L_minus_1_dropout_probs = L_minus_1_dropout_probs.detach()
                                 mask_list.append(L_minus_1_dropout_probs.t())  # Save masks for the current layer in the current batch
                                 next_layer.apply_custom_dropout_prob(L_minus_1_dropout_probs.t())
