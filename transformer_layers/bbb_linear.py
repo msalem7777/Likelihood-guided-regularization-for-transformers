@@ -91,10 +91,10 @@ class BBBLinear(nn.Module):
                 m_min, m_max, m_mean = p.min().item(), p.max().item(), p.mean().item()
                 # print(f"[Mask Check] mask ∈ [{m_min:.4f}, {m_max:.4f}], mean = {m_mean:.4f}")
 
-                if m_mean > 0.99:
-                    print("⚠️ Mask is nearly all 1s — might be dropping everything")
-                elif m_mean < 0.01:
-                    print("⚠️ Mask is nearly all 0s — might be keeping everything")
+                # if m_mean > 0.99:
+                #     # print("⚠️ Mask is nearly all 1s — might be dropping everything")
+                # elif m_mean < 0.01:
+                #     # print("⚠️ Mask is nearly all 0s — might be keeping everything")
 
                 binary_mask = 1-torch.bernoulli(self.custom_mask_prob.to(device).view(self.custom_mask_prob.shape))
                 prob_mask = 1-self.custom_mask_prob.to(device)
