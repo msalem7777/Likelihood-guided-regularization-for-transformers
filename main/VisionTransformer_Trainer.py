@@ -16,6 +16,7 @@ import gc
 import time
 import random
 from collections import defaultdict
+from itertools import product
 from torch.nn import DataParallel
 from torch.utils.data import DataLoader
 from transformer_layers.bbb_ViT import VisionTransformerWithBBB
@@ -25,8 +26,39 @@ from utils.early_stopping import EarlyStopping
 from utils.learning_rate import adjust_learning_rate
 from utils.metrics import metric, MAE, MSE, RMSE, MAPE, MSPE, LGLOSS, ACCRCY
 
+def all_binary_masks_for_all_d(D, device):
+    """
+    Returns:
+    - masks_keep_all: (D, M, D)
+    - masks_drop_all: (D, M, D)
+    where M = 2^{D-1}
+    """
+    from itertools import product
+    configs = torch.tensor(list(product([0., 1.], repeat=D-1)), device=device)  # (M, D-1)
+    M = configs.shape[0]
 
-def fast_compute_weight_dropout(final_layer, activations, targets, dropconnect_delta = 0.5, epsilon=1e-9, *, use_penalties=False, full_criterion=None):
+    masks_keep_all = torch.zeros(D, M, D, device=device)
+    masks_drop_all = torch.zeros(D, M, D, device=device)
+
+    for d in range(D):
+        masks_keep = torch.zeros(M, D, device=device)
+        masks_drop = torch.zeros(M, D, device=device)
+
+        masks_keep[:, :d] = configs[:, :d]
+        masks_keep[:, d+1:] = configs[:, d:]
+        masks_keep[:, d] = 1.
+
+        masks_drop[:, :d] = configs[:, :d]
+        masks_drop[:, d+1:] = configs[:, d:]
+        masks_drop[:, d] = 0.
+
+        masks_keep_all[d] = masks_keep
+        masks_drop_all[d] = masks_drop
+
+    return masks_keep_all, masks_drop_all  # (D, M, D)
+
+
+def fast_compute_weight_dropout(final_layer, activations, targets, dropconnect_delta = 0.5, epsilon=1e-9, *, use_penalties=False, full_criterion=None,  masks_keep_all=None, masks_drop_all=None):
 
     """
     Computes dropout probabilities for all weights in final linear layer
@@ -47,31 +79,39 @@ def fast_compute_weight_dropout(final_layer, activations, targets, dropconnect_d
             # per-example CE, *no penalties* (recommended)
             loss_orig = -F.cross_entropy(logits, targets, reduction='none')  # (B,)
 
-        # Compute original class logit contributions
-        contrib = torch.einsum('bd,cd->bcd', A, W)    # (B, C, D)
+        # Compute masks if not provided (fallback mode)
+        if masks_keep_all is None or masks_drop_all is None:
+            masks_keep_all, masks_drop_all = all_binary_masks_for_all_d(D, device=device)  # (D, M, D)
 
-        # logits[b, c] - A[b, d] * W[c, d] for each d → perturbed logits
-        logits_exp = logits.unsqueeze(1).unsqueeze(2)         # (B, 1, 1, C)
-        logits_exp = logits_exp.expand(-1, C, D, -1)          # (B, C, D, C)
-        eye   = torch.eye(C, device=W.device).view(1, C, 1, C) # eye : (1, C, 1, C) – broadcast helper
+        M = masks_keep_all.shape[1]
 
-        delta = contrib.unsqueeze(-1) * eye                   # (B, C, D, C)
-        logits_perturbed_full = logits_exp - delta            # (B, C, D, C)
+        # Expand A: (B, 1, 1, D) → (B, D, M, D)
+        A_exp = A.view(B, 1, 1, D).expand(B, D, M, D)
+        W_exp = W.view(1, C, 1, D).expand(D, C, M, D).transpose(0, 1)  # (C, D, M, D)
 
-        logits_flat  = logits_perturbed_full.reshape(B * C * D, C) # (B*C*D, C)
+        masks_keep = masks_keep_all.unsqueeze(0)  # (1, D, M, D)
+        masks_drop = masks_drop_all.unsqueeze(0)
 
-        targets_flat  = targets.view(B, 1, 1).expand(-1, C, D).reshape(-1)  # (B*C*D,)
+        A_keep = A_exp * masks_keep  # (B, D, M, D)
+        A_drop = A_exp * masks_drop
+        W_keep = W_exp * masks_keep
+        W_drop = W_exp * masks_drop
 
-        loss_dropped  = -F.cross_entropy(logits_flat, targets_flat, reduction='none')                  # (B*C*D,)
-        loss_dropped  = loss_dropped.view(B, C, D)                          # (B, C, D) 
-        
-        # Loss difference per (d, b)
-        delta_loss = loss_orig.view(B, 1, 1) - loss_dropped                 # (B, C, D)
-        avg_delta  = delta_loss.mean(dim=0)                                 # (C, D)
-        loss_diff = avg_delta                                              # (C, D)
+        logits_keep = torch.einsum('bdmd,cdmd->bdmc', A_keep, W_keep)  # (B, D, M, C)
+        logits_drop = torch.einsum('bdmd,cdmd->bdmc', A_drop, W_drop)
 
-        delta = np.log(dropconnect_delta/(1-dropconnect_delta))              # External Field
-        dropout_prob = 1 - 1 / (1 + torch.exp(-2 * (0.5 * loss_diff) + delta))  # (C, D)
+        logits_keep_flat = logits_keep.reshape(B * D * M, C)
+        logits_drop_flat = logits_drop.reshape(B * D * M, C)
+        targets_flat = targets.view(B, 1, 1).expand(-1, D, M).reshape(-1)
+
+        loss_keep = -F.cross_entropy(logits_keep_flat, targets_flat, reduction='none').view(B, D, M)
+        loss_drop = -F.cross_entropy(logits_drop_flat, targets_flat, reduction='none').view(B, D, M)
+
+        delta = (loss_keep - loss_drop).mean(dim=0).mean(dim=1)  # (D,)
+        loss_diff = delta.unsqueeze(0).expand(C, D)
+
+        delta_term = np.log(dropconnect_delta / (1 - dropconnect_delta))
+        dropout_prob = 1 - 1 / (1 + torch.exp(-2 * (0.5 * loss_diff) + delta_term))  # (C, D)
 
         return dropout_prob.detach()
 
@@ -525,6 +565,10 @@ class VisionTransformerTrainer:
                     final_layer_name = "classification_head.3"  # Ensure this matches the stored key
 
                     act = self.layer_inputs[(model, final_layer_name)]   # shape [B*T, D]
+
+                    if epoch == (self.args.train_epochs+1):
+                        D = final_layer.mean_weight.shape[1]
+                        masks_keep_all, masks_drop_all = all_binary_masks_for_all_d(D, device=act.device)  # (D, M, D)
 
                     # B = batch_y.size(0)           # real batch size (1 during Ising phase)
                     # T = act.size(0) // B          # number of tokens per sample
