@@ -108,7 +108,7 @@ def fast_compute_weight_dropout(final_layer, activations, targets, dropconnect_d
         loss_diff = delta.unsqueeze(0).expand(C, D)
 
         delta_term = np.log(dropconnect_delta / (1 - dropconnect_delta))
-        dropout_prob = 1 - 1 / (1 + torch.exp(-2 * (0.5 * loss_diff) + delta_term))  # (C, D)
+        dropout_prob = 1 - 1 / (1 + torch.exp(-2 * (0.5 * loss_diff) + delta_term + epsilon))  # (C, D)
 
         return dropout_prob.detach()
 
