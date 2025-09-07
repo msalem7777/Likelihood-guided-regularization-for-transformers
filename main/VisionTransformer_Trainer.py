@@ -591,7 +591,9 @@ class VisionTransformerTrainer:
                             activations   = penultimate_act,   # GPU activations
                             targets       = batch_y,           # GPU labels
                             dropconnect_delta = self.args.dropconnect_delta,    # External Field Parameter
-                            epsilon       = epsilon
+                            epsilon       = epsilon,
+                            masks_keep_all=masks_keep_all,
+                            masks_drop_all=masks_drop_all
                         )
 
                     mask_list.append(mask)                  # keep mask for later
