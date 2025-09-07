@@ -26,36 +26,33 @@ from utils.early_stopping import EarlyStopping
 from utils.learning_rate import adjust_learning_rate
 from utils.metrics import metric, MAE, MSE, RMSE, MAPE, MSPE, LGLOSS, ACCRCY
 
-def all_binary_masks_for_all_d(D, device):
+def all_binary_masks_for_all_d(D, S, device):
     """
     Returns:
-    - masks_keep_all: (D, M, D)
-    - masks_drop_all: (D, M, D)
-    where M = 2^{D-1}
+    - masks_keep_all: (D, S, D)
+    - masks_drop_all: (D, S, D)
     """
-    from itertools import product
-    configs = torch.tensor(list(product([0., 1.], repeat=D-1)), device=device)  # (M, D-1)
-    M = configs.shape[0]
-
-    masks_keep_all = torch.zeros(D, M, D, device=device)
-    masks_drop_all = torch.zeros(D, M, D, device=device)
+    masks_keep_all = torch.zeros(D, S, D, device=device)
+    masks_drop_all = torch.zeros(D, S, D, device=device)
 
     for d in range(D):
-        masks_keep = torch.zeros(M, D, device=device)
-        masks_drop = torch.zeros(M, D, device=device)
+        masks = torch.bernoulli(torch.full((S, D - 1), 0.5, device=device))  # (S, D-1)
 
-        masks_keep[:, :d] = configs[:, :d]
-        masks_keep[:, d+1:] = configs[:, d:]
-        masks_keep[:, d] = 1.
+        keep = torch.zeros(S, D, device=device)
+        drop = torch.zeros(S, D, device=device)
 
-        masks_drop[:, :d] = configs[:, :d]
-        masks_drop[:, d+1:] = configs[:, d:]
-        masks_drop[:, d] = 0.
+        keep[:, :d] = masks[:, :d]
+        keep[:, d+1:] = masks[:, d:]
+        keep[:, d] = 1.0
 
-        masks_keep_all[d] = masks_keep
-        masks_drop_all[d] = masks_drop
+        drop[:, :d] = masks[:, :d]
+        drop[:, d+1:] = masks[:, d:]
+        drop[:, d] = 0.0
 
-    return masks_keep_all, masks_drop_all  # (D, M, D)
+        masks_keep_all[d] = keep
+        masks_drop_all[d] = drop
+
+    return masks_keep_all, masks_drop_all  # (D, S, D)
 
 
 def fast_compute_weight_dropout(final_layer, activations, targets, dropconnect_delta = 0.5, epsilon=1e-9, *, use_penalties=False, full_criterion=None,  masks_keep_all=None, masks_drop_all=None):
@@ -81,7 +78,7 @@ def fast_compute_weight_dropout(final_layer, activations, targets, dropconnect_d
 
         # Compute masks if not provided (fallback mode)
         if masks_keep_all is None or masks_drop_all is None:
-            masks_keep_all, masks_drop_all = all_binary_masks_for_all_d(D, device=device)  # (D, M, D)
+            masks_keep_all, masks_drop_all = all_binary_masks_for_all_d(D, S=128, device=device)  # (D, M, D)
 
         M = masks_keep_all.shape[1]
 
@@ -191,7 +188,7 @@ class VisionTransformerTrainer:
                 num_heads=self.args.num_heads,
                 depth=self.args.depth,
                 dropout=self.args.dropout,
-                dropconnect=self.args.dropconnect,
+                dropconnect=self.args.dropconnect_delta,
                 device=self.device,
                 epoch_tracker=self,  # Pass the instance for epoch tracking
             ).float()
@@ -566,9 +563,9 @@ class VisionTransformerTrainer:
 
                     act = self.layer_inputs[(model, final_layer_name)]   # shape [B*T, D]
 
-                    if epoch == (self.args.train_epochs+1):
+                    if epoch == (self.args.train_epochs):
                         D = final_layer.mean_weight.shape[1]
-                        masks_keep_all, masks_drop_all = all_binary_masks_for_all_d(D, device=act.device)  # (D, M, D)
+                        masks_keep_all, masks_drop_all = all_binary_masks_for_all_d(D, self.args.mc_samples, device=act.device)  # (D, M, D)
 
                     # B = batch_y.size(0)           # real batch size (1 during Ising phase)
                     # T = act.size(0) // B          # number of tokens per sample
@@ -585,7 +582,6 @@ class VisionTransformerTrainer:
                         deda[final_layer_name] = 2*(grad / (input_activations + epsilon))**2  
                         saliency_scores[final_layer_name] = deda[final_layer_name].clone().detach()
                     
-
                     mask = fast_compute_weight_dropout(
                             final_layer   = final_layer,       # GPU weights
                             activations   = penultimate_act,   # GPU activations
