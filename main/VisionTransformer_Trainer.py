@@ -67,6 +67,10 @@ def fast_compute_weight_dropout(final_layer, activations, targets, dropconnect_d
         B, D = A.shape
         C = W.shape[0]
 
+        assert torch.all(torch.isfinite(W)), "NaNs/Infs in final_layer.mean_weight"
+        assert torch.all(torch.isfinite(A)), "NaNs/Infs in activations"
+        assert torch.all(targets >= 0) and torch.all(targets < C), "Invalid target values"
+
         logits = A @ W.T                              # (B, C)
 
         if use_penalties and full_criterion is not None:
@@ -101,6 +105,10 @@ def fast_compute_weight_dropout(final_layer, activations, targets, dropconnect_d
         logits_drop_flat = logits_drop.reshape(B * D * M, C)
         targets_flat = targets.view(B, 1, 1).expand(-1, D, M).reshape(-1)
 
+        # Validate logits before CE
+        assert torch.all(torch.isfinite(logits_keep_flat)), "NaNs in logits_keep"
+        assert torch.all(torch.isfinite(logits_drop_flat)), "NaNs in logits_drop"
+
         loss_keep = -F.cross_entropy(logits_keep_flat, targets_flat, reduction='none').view(B, D, M)
         loss_drop = -F.cross_entropy(logits_drop_flat, targets_flat, reduction='none').view(B, D, M)
 
@@ -108,7 +116,23 @@ def fast_compute_weight_dropout(final_layer, activations, targets, dropconnect_d
         loss_diff = delta.unsqueeze(0).expand(C, D)
 
         delta_term = np.log(dropconnect_delta / (1 - dropconnect_delta))
-        dropout_prob = 1 - 1 / (1 + torch.exp(-2 * (0.5 * loss_diff) + delta_term + epsilon))  # (C, D)
+
+        # Final dropout prob (stabilized)
+        logits_out = -2 * (0.5 * loss_diff) + delta_term
+        logits_out = torch.nan_to_num(logits_out, nan=0.0, posinf=20.0, neginf=-20.0)  # stabilize
+
+        dropout_prob = torch.sigmoid(logits_out)
+
+        # Final clamping and diagnostics
+        dropout_prob = torch.clamp(dropout_prob, min=epsilon, max=1 - epsilon)
+
+        if not torch.all(torch.isfinite(dropout_prob)):
+            nan_rows = ~torch.isfinite(dropout_prob).all(dim=1)
+            print("🔥 NaNs in dropout_prob at class indices:", torch.where(nan_rows)[0])
+            print("Dropout row sample:", dropout_prob[nan_rows])
+            dropout_prob = torch.nan_to_num(dropout_prob, nan=1.0, posinf=1.0, neginf=0.0)
+
+        # dropout_prob = 1 - 1 / (1 + torch.exp(-2 * (0.5 * loss_diff) + delta_term + epsilon))  # (C, D)
 
         return dropout_prob.detach()
 
@@ -179,6 +203,7 @@ class VisionTransformerTrainer:
     def _build_model(self):
         # Build multiple ViT models if specified in args
         models = []
+        initial_dropout = 0.0 if self.args.ising_epochs > 0 else self.args.dropout
         for _ in range(self.args.num_models):
             model = VisionTransformerWithBBB(
                 img_size=self.args.img_size,
@@ -187,8 +212,9 @@ class VisionTransformerTrainer:
                 embed_dim=self.args.embed_dim,
                 num_heads=self.args.num_heads,
                 depth=self.args.depth,
-                dropout=self.args.dropout,
-                dropconnect=self.args.dropconnect_delta,
+                dropout=initial_dropout,
+                p_bayes=self.args.p_bayes,
+                dropconnect_delta=self.args.dropconnect_delta,
                 device=self.device,
                 epoch_tracker=self,  # Pass the instance for epoch tracking
             ).float()
@@ -524,6 +550,15 @@ class VisionTransformerTrainer:
                 phase = 'fine-tuning'
             self.set_current_phase(phase)
 
+            if self.args.ising_epochs > 0 and phase == 'fine-tuning' and epoch == (self.args.train_epochs + self.args.ising_epochs):
+                for model in self.models:
+                    core_model = model.module if isinstance(model, nn.DataParallel) else model
+                    for m in core_model.modules():
+                        if isinstance(m, nn.Dropout):
+                            m.p = self.args.dropout
+                    if hasattr(core_model, 'dropout'):
+                        core_model.dropout = self.args.dropout
+
             if ((phase == "ising") or (epoch == (self.args.train_epochs-1))) and (self.args.ising_batch==True):
                 train_data, train_loader = train_data_ising, train_loader_ising
                 vali_data, vali_loader = vali_data_ising, vali_loader_ising  
@@ -563,9 +598,12 @@ class VisionTransformerTrainer:
 
                     act = self.layer_inputs[(model, final_layer_name)]   # shape [B*T, D]
 
-                    if epoch == (self.args.train_epochs):
-                        D = final_layer.mean_weight.shape[1]
-                        masks_keep_all, masks_drop_all = all_binary_masks_for_all_d(D, self.args.mc_samples, device=act.device)  # (D, M, D)
+                    # if epoch == (self.args.train_epochs):
+                    #     D = final_layer.mean_weight.shape[1]
+                    #     masks_keep_all, masks_drop_all = all_binary_masks_for_all_d(D, self.args.mc_samples, device=act.device)  # (D, M, D)
+
+                    D = final_layer.mean_weight.shape[1]
+                    masks_keep_all, masks_drop_all = all_binary_masks_for_all_d(D, self.args.mc_samples, device=act.device)  # (D, M, D)
 
                     # B = batch_y.size(0)           # real batch size (1 during Ising phase)
                     # T = act.size(0) // B          # number of tokens per sample
@@ -684,7 +722,16 @@ class VisionTransformerTrainer:
                                     saliency_score = torch.zeros_like(L1_mat.t())
                                     
                                 a_i_tensor = torch.sum(L_minus_1_connec, dim=1).unsqueeze(0).repeat(num_rows, 1) + 0.5*saliency_score.t()
-                                L_minus_1_dropout_probs = 1 - 1 / (1 + torch.exp(-2 * a_i_tensor + np.log(self.args.dropconnect_delta/(1-self.args.dropconnect_delta))))
+                                # L_minus_1_dropout_probs = 1 - 1 / (1 + torch.exp(-2 * a_i_tensor + np.log(self.args.dropconnect_delta/(1-self.args.dropconnect_delta)) + epsilon))
+                                
+                                # Compute stable dropout probs (still sigmoid-like function)
+                                delta_term = np.log(self.args.dropconnect_delta / (1 - self.args.dropconnect_delta))
+                                L_minus_1_dropout_probs = 1 - 1 / (1 + torch.exp(-2 * a_i_tensor + delta_term + epsilon))
+
+                                # Final cleanup: prevent NaNs and keep probs in safe [ε, 1-ε] range
+                                L_minus_1_dropout_probs = torch.nan_to_num(L_minus_1_dropout_probs, nan=0.5, posinf=0.99, neginf=0.01)
+                                L_minus_1_dropout_probs = torch.clamp(L_minus_1_dropout_probs, min=epsilon, max=1 - epsilon)
+                                
                                 L_minus_1_dropout_probs = L_minus_1_dropout_probs.detach()
                                 mask_list.append(L_minus_1_dropout_probs.t())  # Save masks for the current layer in the current batch
                                 next_layer.apply_custom_dropout_prob(L_minus_1_dropout_probs.t())
