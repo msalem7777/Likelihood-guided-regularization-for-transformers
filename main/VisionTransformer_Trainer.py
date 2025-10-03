@@ -18,6 +18,7 @@ import random
 from collections import defaultdict
 from itertools import product
 from torch.nn import DataParallel
+from scipy.stats import mode, entropy
 from torch.utils.data import DataLoader
 from transformer_layers.bbb_ViT import VisionTransformerWithBBB
 from transformer_layers.bbb_linear import BBBLinear
@@ -540,99 +541,87 @@ class VisionTransformerTrainer:
 
     def predict_mc_posterior_weight_sampling_quantiles(self, n_mc=50, n_quantiles=10, inverse=False):
         """
-        Runs MC predictions by drawing weights from N(mean, std) and binary masks from final mask probabilities.
-        Returns posterior distributions of predictions and probabilities for each sample, including quantiles.
-
-        Args:
-            n_mc (int): Number of Monte Carlo samples (forward passes per sample).
-            n_quantiles (int): Number of quantiles to compute (e.g. 10 for deciles).
-            inverse (bool): Whether to inverse the predictions if necessary.
-
-        Returns:
-            List[pd.DataFrame]: For each model, a DataFrame:
-                - 'true_label'
-                - 'mc_pred_mode', 'mc_pred_entropy', 'mc_prob_mean_class_{c}'
-                - For each class and quantile: 'prob_class_{c}_quantile_{q}'
+        For each MC pass, sample weights for every BBBLinear layer,
+        run prediction for all test samples, and collect MC posterior stats.
+        NO mask sampling performed.
         """
         args = self.args
         data_set, data_loader = self._get_data(flag='test')
         num_classes = self.args.num_classes
 
+        # Gather all test data before MC loop
+        all_x, all_y = [], []
+        for batch_x, batch_y in data_loader:
+            all_x.append(batch_x)
+            all_y.append(batch_y)
+        all_x = torch.cat(all_x, dim=0)
+        all_y = torch.cat(all_y, dim=0)
+        n_samples = all_x.shape[0]
+        all_true_labels = all_y.cpu().numpy()
+
         results_dfs = []
-        quantile_points = np.linspace(0, 1, n_quantiles + 1)[1:-1]  # e.g. [0.1, 0.2, ..., 0.9] for deciles
+        quantile_points = np.linspace(0, 1, n_quantiles + 1)[1:-1]
 
         for model_idx, model in enumerate(self.models):
             model.eval()
-            all_true_labels = []
-            mc_pred_labels = [[] for _ in range(n_mc)]
-            mc_probs = [[] for _ in range(n_mc)]
+
+            mc_pred_labels = np.zeros((n_samples, n_mc), dtype=int)
+            mc_probs = np.zeros((n_samples, n_mc, num_classes), dtype=float)
+
+            orig_forwards = {}
 
             with torch.no_grad():
-                for batch_x, batch_y in data_loader:
-                    batch_x, batch_y = batch_x.to(self.device), batch_y.to(self.device)
-                    all_true_labels.extend(batch_y.cpu().numpy())
+                for mc in range(n_mc):
+                    # For each BBBLinear layer, resample weights only
+                    for name, layer in model.named_modules():
+                        if hasattr(layer, "mean_weight") and hasattr(layer, "log_std_weight"):
+                            device = layer.mean_weight.device
+                            # Sample weights
+                            std_weight = torch.exp(layer.log_std_weight).to(device)
+                            sampled_weight = layer.mean_weight + std_weight * torch.randn_like(layer.mean_weight, device=device)
+                            layer._mc_weight = sampled_weight
+                            layer._mc_bias = layer.mean_bias
+                            if name not in orig_forwards:
+                                orig_forwards[name] = layer.forward
+                            def mc_forward(self, input):
+                                return torch.nn.functional.linear(input, self._mc_weight, self._mc_bias)
+                            layer.forward = mc_forward.__get__(layer, type(layer))
 
-                    for mc in range(n_mc):
-                        # For each BBBLinear layer, sample weights and mask
-                        for name, layer in model.named_modules():
-                            if hasattr(layer, "custom_mask_prob") and layer.custom_mask_prob is not None:
-                                device = layer.mean_weight.device
-                                # Sample weights
-                                std_weight = torch.exp(layer.log_std_weight).to(device)
-                                sampled_weight = layer.mean_weight + std_weight * torch.randn_like(layer.mean_weight, device=device)
-                                # Sample mask
-                                sampled_mask = torch.bernoulli(layer.custom_mask_prob.to(device))
-                                # Apply: set a temporary attribute for sampled weights/mask
-                                layer._mc_weight = sampled_weight * sampled_mask
-                                layer._mc_bias = layer.mean_bias  # (optionally, sample bias too)
-                                # Monkey-patch forward for MC sample
-                                def mc_forward(self, input):
-                                    return F.linear(input, self._mc_weight, self._mc_bias)
-                                layer.forward = mc_forward.__get__(layer, type(layer))
+                    # Forward pass for all test samples
+                    pred = model(all_x.to(self.device))
+                    if inverse:
+                        pred = self.inverse_transform(pred)
+                    prob = torch.softmax(pred, dim=1)
+                    pred_label = torch.argmax(prob, dim=1)
+                    mc_pred_labels[:, mc] = pred_label.cpu().numpy()
+                    mc_probs[:, mc, :] = prob.cpu().numpy()
 
-                        # Forward pass
-                        pred = model(batch_x)
-                        if inverse:
-                            pred = self.inverse_transform(pred)
-
-                        prob = torch.softmax(pred, dim=1)
-                        pred_label = torch.argmax(prob, dim=1)
-
-                        mc_pred_labels[mc].extend(pred_label.cpu().numpy())
-                        mc_probs[mc].extend(prob.cpu().numpy())
-
-                        # Cleanup: restore the original forward method
-                        for name, layer in model.named_modules():
-                            if hasattr(layer, "_mc_weight"):
-                                delattr(layer, "_mc_weight")
-                                # TODO: restore original forward if necessary
-
-            # Collate results
-            n_samples = len(all_true_labels)
-            mc_preds_arr = np.stack([np.array(mc_pred_labels[mc]) for mc in range(n_mc)], axis=1)  # [n_samples, n_mc]
-            mc_probs_arr = np.stack([np.array(mc_probs[mc]) for mc in range(n_mc)], axis=1)  # [n_samples, n_mc, num_classes]
+                    # Restore original forwards
+                    for name, layer in model.named_modules():
+                        if hasattr(layer, "_mc_weight"):
+                            delattr(layer, "_mc_weight")
+                            delattr(layer, "_mc_bias")
+                            layer.forward = orig_forwards[name]
 
             # Build DataFrame
             df_dict = {
-                'true_label': np.array(all_true_labels)
+                'true_label': all_true_labels,
+                'mc_pred_mode': mode(mc_pred_labels, axis=1)[0].squeeze(),
+                'mc_pred_entropy': entropy(
+                    np.array([np.bincount(row, minlength=num_classes) for row in mc_pred_labels]).T + 1e-10, base=2
+                )
             }
-            # Modal class and entropy per sample
-            from scipy.stats import mode, entropy
-            df_dict['mc_pred_mode'] = mode(mc_preds_arr, axis=1)[0].squeeze()
-            pred_counts = np.array([np.bincount(row, minlength=num_classes) for row in mc_preds_arr])
-            df_dict['mc_pred_entropy'] = entropy(pred_counts.T + 1e-10, base=2)
+            # Mean probability per class
             for c in range(num_classes):
-                df_dict[f'mc_prob_mean_class_{c}'] = np.mean(mc_probs_arr[:, :, c], axis=1)
-
-            # Add quantiles for each class
+                df_dict[f'mc_prob_mean_class_{c}'] = np.mean(mc_probs[:, :, c], axis=1)
+            # Quantiles per class
             for c in range(num_classes):
                 for q in quantile_points:
-                    quant_vals = np.quantile(mc_probs_arr[:, :, c], q, axis=1)
+                    quant_vals = np.quantile(mc_probs[:, :, c], q, axis=1)
                     df_dict[f'prob_class_{c}_quantile_{q:.2f}'] = quant_vals
 
             results_df = pd.DataFrame(df_dict)
             results_dfs.append(results_df)
-
         return results_dfs  # One DataFrame per model
 
     def train(self):
@@ -917,7 +906,7 @@ class VisionTransformerTrainer:
                             hist.pop(0)            
                 
                 # Handle Ising phase-specific computations
-                if phase == 'fine-tuning' and avgd_masks == 0:
+                if (epoch == (self.args.train_epochs + self.args.ising_epochs + self.args.addtl_ft-1)) and avgd_masks == 0:
                     avgd_masks = 1
 
                     for layer_name, masks in self._mask_history.items():
