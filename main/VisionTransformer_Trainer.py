@@ -55,7 +55,7 @@ def all_binary_masks_for_all_d(D, S, device):
     return masks_keep_all, masks_drop_all  # (D, S, D)
 
 
-def fast_compute_weight_dropout(final_layer, activations, targets, dropconnect_delta = 0.5, epsilon=1e-9, *, use_penalties=False, full_criterion=None,  masks_keep_all=None, masks_drop_all=None):
+def fast_compute_weight_dropout(final_layer, activations, targets, dropconnect_delta = 0.5, epsilon=1e-9, *, use_penalties=False, full_criterion=None,  masks_keep_all=None, masks_drop_all=None, mc_samples = 128):
 
     """
     Computes dropout probabilities for all weights in final linear layer
@@ -82,7 +82,7 @@ def fast_compute_weight_dropout(final_layer, activations, targets, dropconnect_d
 
         # Compute masks if not provided (fallback mode)
         if masks_keep_all is None or masks_drop_all is None:
-            masks_keep_all, masks_drop_all = all_binary_masks_for_all_d(D, S=128, device=device)  # (D, M, D)
+            masks_keep_all, masks_drop_all = all_binary_masks_for_all_d(D, S=mc_samples, device=device)  # (D, M, D)
 
         M = masks_keep_all.shape[1]
 
@@ -778,7 +778,8 @@ class VisionTransformerTrainer:
                             dropconnect_delta = self.args.dropconnect_delta,    # External Field Parameter
                             epsilon       = epsilon,
                             masks_keep_all=masks_keep_all,
-                            masks_drop_all=masks_drop_all
+                            masks_drop_all=masks_drop_all,
+                            mc_samples = self.args.mc_samples
                         )
 
                     mask_list.append(mask)                  # keep mask for later
