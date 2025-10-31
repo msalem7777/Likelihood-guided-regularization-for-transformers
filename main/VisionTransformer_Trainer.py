@@ -541,9 +541,8 @@ class VisionTransformerTrainer:
 
     def predict_mc_posterior_weight_sampling_quantiles(self, n_mc=50, n_quantiles=10, inverse=False):
         """
-        For each MC pass, sample weights for every BBBLinear layer,
+        For each MC pass, sample weights and Bernoulli masks for every BBBLinear layer,
         run prediction for all test samples, and collect MC posterior stats.
-        NO mask sampling performed.
         """
         args = self.args
         data_set, data_loader = self._get_data(flag='test')
@@ -567,20 +566,28 @@ class VisionTransformerTrainer:
 
             mc_pred_labels = np.zeros((n_samples, n_mc), dtype=int)
             mc_probs = np.zeros((n_samples, n_mc, num_classes), dtype=float)
-
             orig_forwards = {}
 
             with torch.no_grad():
                 for mc in range(n_mc):
-                    # For each BBBLinear layer, resample weights only
+                    # For each BBBLinear layer, resample weights and mask
                     for name, layer in model.named_modules():
+                        # Use avg_dropout_mask buffer for mask probabilities
                         if hasattr(layer, "mean_weight") and hasattr(layer, "log_std_weight"):
                             device = layer.mean_weight.device
                             # Sample weights
                             std_weight = torch.exp(layer.log_std_weight).to(device)
                             sampled_weight = layer.mean_weight + std_weight * torch.randn_like(layer.mean_weight, device=device)
-                            layer._mc_weight = sampled_weight
+                            if hasattr(layer, "avg_dropout_mask"):
+                                # Sample mask from avg_dropout_mask
+                                mask_prob = 1- layer.avg_dropout_mask.to(device)
+                            else:
+                                mask_prob = torch.full_like(layer.mean_weight, 1 - self.args.p_bayes)
+                            sampled_mask = torch.bernoulli(mask_prob)
+                            # Masked weights
+                            layer._mc_weight = sampled_weight * sampled_mask
                             layer._mc_bias = layer.mean_bias
+                            # Monkey-patch forward
                             if name not in orig_forwards:
                                 orig_forwards[name] = layer.forward
                             def mc_forward(self, input):
@@ -738,17 +745,8 @@ class VisionTransformerTrainer:
 
                     act = self.layer_inputs[(model, final_layer_name)]   # shape [B*T, D]
 
-                    # if epoch == (self.args.train_epochs):
-                    #     D = final_layer.mean_weight.shape[1]
-                    #     masks_keep_all, masks_drop_all = all_binary_masks_for_all_d(D, self.args.mc_samples, device=act.device)  # (D, M, D)
-
                     D = final_layer.mean_weight.shape[1]
                     masks_keep_all, masks_drop_all = all_binary_masks_for_all_d(D, self.args.mc_samples, device=act.device)  # (D, M, D)
-
-                    # B = batch_y.size(0)           # real batch size (1 during Ising phase)
-                    # T = act.size(0) // B          # number of tokens per sample
-                    # act = act.view(B, T, -1)      # [B, T, D]
-                    # act = act.mean(dim=1)         # average over tokens  -> [B, D]
 
                     penultimate_act = act.detach()
 
@@ -906,7 +904,7 @@ class VisionTransformerTrainer:
                             hist.pop(0)            
                 
                 # Handle Ising phase-specific computations
-                if (epoch == (self.args.train_epochs + self.args.ising_epochs + self.args.addtl_ft-1)) and avgd_masks == 0:
+                if (epoch == (self.args.train_epochs + self.args.ising_epochs + self.args.addtl_ft-1)) and (self.args.ising_epochs > 0) and avgd_masks == 0:
                     avgd_masks = 1
 
                     for layer_name, masks in self._mask_history.items():
@@ -1075,7 +1073,6 @@ class VisionTransformerTrainer:
         self._run_stats["ising_expected_dropped"]  = getattr(self, "ising_expec_params", 0)
         self._run_stats["ising_dropped"]  = getattr(self, "ising_params", 0)
         self._run_stats["total_potential"]  = getattr(self, "total_maskable", 0)
-
 
         return self.models
 
