@@ -142,6 +142,7 @@ class VisionTransformerTrainer:
         self.models = [model.to(self.device) for model in self.models]      # Move each model to the appropriate device
         self.current_epoch = 'pilot'                                        # Initialize epoch tracker
         self._init_run_stats()          # Experiment results tracking
+        self._dataloader_cache = {}     # batch_size -> dataloaders dict; built once, reused
         
     def set_current_phase(self, phase):
         """
@@ -227,17 +228,21 @@ class VisionTransformerTrainer:
         """
         args = self.args
 
-        # Fetch all dataloaders using the pre-existing function
-        dataloaders = get_vit_dataloaders(
-            dataset_name=args.dataset,  # e.g., 'cifar10', 'cifar100', 'mnist', etc.
-            data_dir=args.data_path,   # Path to the data directory
-            batch_size=args.batch_size,
-            val_split=args.val_split,  # Fraction of data for validation
-            test_split=args.test_split,  # Fraction of data for testing
-            image_size=args.img_size,  # Image resizing for ViT
-            num_workers = args.num_workers
-        )
-    
+        # Build dataloaders once per batch size; reuse on subsequent calls
+        cache_key = args.batch_size
+        if cache_key not in self._dataloader_cache:
+            self._dataloader_cache[cache_key] = get_vit_dataloaders(
+                dataset_name=args.dataset,
+                data_dir=args.data_path,
+                batch_size=args.batch_size,
+                val_split=args.val_split,
+                test_split=args.test_split,
+                image_size=args.img_size,
+                num_workers=args.num_workers,
+                split_seed=getattr(args, 'split_seed', 42),
+            )
+        dataloaders = self._dataloader_cache[cache_key]
+
         # Map flag to the correct dataset and dataloader
         if flag == 'train':
             data_set = dataloaders['train'].dataset
@@ -253,7 +258,8 @@ class VisionTransformerTrainer:
     
         # Example: Log dataset stats for training phase
         if flag == 'train':
-            self.train_pos = sum(1 for _, label in data_set if label == 1)  # Example for binary labels
+            base_targets = torch.as_tensor(data_set.dataset.targets)
+            self.train_pos = int((base_targets[data_set.indices] == 1).sum())
             self.train_len = len(data_set)
             print(f"Training length: {self.train_len}")
     
@@ -271,16 +277,21 @@ class VisionTransformerTrainer:
         """
         args = self.args
 
-        # Fetch all dataloaders using the pre-existing function
-        dataloaders = get_vit_dataloaders(
-            dataset_name=args.dataset,  # e.g., 'cifar10', 'cifar100', 'mnist', etc.
-            data_dir=args.data_path,   # Path to the data directory
-            batch_size=1,
-            val_split=args.val_split,  # Fraction of data for validation
-            test_split=args.test_split,  # Fraction of data for testing
-            image_size=args.img_size,  # Image resizing for ViT
-            num_workers = args.num_workers
-        )
+        # Build batch-size-1 dataloaders once; same split_seed as _get_data,
+        # so the Ising loaders iterate the SAME partition as the normal loaders
+        cache_key = 1
+        if cache_key not in self._dataloader_cache:
+            self._dataloader_cache[cache_key] = get_vit_dataloaders(
+                dataset_name=args.dataset,
+                data_dir=args.data_path,
+                batch_size=1,
+                val_split=args.val_split,
+                test_split=args.test_split,
+                image_size=args.img_size,
+                num_workers=args.num_workers,
+                split_seed=getattr(args, 'split_seed', 42),
+            )
+        dataloaders = self._dataloader_cache[cache_key]
     
         # Map flag to the correct dataset and dataloader
         if flag == 'train':
@@ -297,7 +308,8 @@ class VisionTransformerTrainer:
     
         # Example: Log dataset stats for training phase
         if flag == 'train':
-            self.train_pos = sum(1 for _, label in data_set if label == 1)  # Example for binary labels
+            base_targets = torch.as_tensor(data_set.dataset.targets)
+            self.train_pos = int((base_targets[data_set.indices] == 1).sum())
             self.train_len = len(data_set)
     
         return data_set, data_loader
@@ -310,7 +322,7 @@ class VisionTransformerTrainer:
         preds, trues = [], []
         with torch.no_grad():
             for x, y in data_loader:
-                x, y = x.to(self.device), y.to(self.device)
+                x, y = x.to(self.device, non_blocking=True), y.to(self.device, non_blocking=True)
                 out  = model(x)
                 preds.append(out.argmax(dim=1).cpu().numpy())
                 trues.append(y.cpu().numpy())
@@ -382,8 +394,8 @@ class VisionTransformerTrainer:
         with torch.no_grad():  # Disable gradient computation
             for i, (batch_x, batch_y) in enumerate(vali_loader):
                 # Move data to the appropriate device
-                batch_x = batch_x.to(self.device)
-                batch_y = batch_y.to(self.device)
+                batch_x = batch_x.to(self.device, non_blocking=True)
+                batch_y = batch_y.to(self.device, non_blocking=True)
                 
                 # Get predictions from the model
                 pred = model(batch_x)  # Forward pass
@@ -431,7 +443,7 @@ class VisionTransformerTrainer:
     
             with torch.no_grad():
                 for batch_x, batch_y in data_loader:
-                    batch_x, batch_y = batch_x.to(self.device), batch_y.to(self.device)
+                    batch_x, batch_y = batch_x.to(self.device, non_blocking=True), batch_y.to(self.device, non_blocking=True)
     
                     # Forward pass
                     pred = model(batch_x)
@@ -720,8 +732,8 @@ class VisionTransformerTrainer:
 
             for i, (batch_x,batch_y) in enumerate(train_loader):
                 
-                batch_y = batch_y.to(self.device)
-                batch_x = batch_x.to(self.device)
+                batch_y = batch_y.to(self.device, non_blocking=True)
+                batch_x = batch_x.to(self.device, non_blocking=True)
                 iter_count += 1
 
                 # Handle Ising phase-specific computations

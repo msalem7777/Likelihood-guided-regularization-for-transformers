@@ -23,7 +23,7 @@ class To3Channels:
     def __call__(self, img):
         return img.repeat(3, 1, 1)  # Repeat the single channel to create 3 channels
 
-def get_vit_dataloaders(dataset_name, data_dir, batch_size=32, val_split=0.2, test_split=0.1, image_size=224, num_workers = 0):
+def get_vit_dataloaders(dataset_name, data_dir, batch_size=32, val_split=0.2, test_split=0.1, image_size=224, num_workers = 0, split_seed=42):
     """
     Creates DataLoaders for a dataset compatible with Vision Transformers.
 
@@ -75,15 +75,23 @@ def get_vit_dataloaders(dataset_name, data_dir, batch_size=32, val_split=0.2, te
     train_size = total_size - test_size - val_size
     assert train_size > 0, "Training set size is zero! Adjust your val/test splits."
 
-
-    # Split the dataset
-    train_dataset, val_dataset, test_dataset = random_split(dataset, [train_size, val_size, test_size])
+    # Split the dataset (seeded: identical partition on every call)
+    split_gen = torch.Generator().manual_seed(split_seed)
+    train_dataset, val_dataset, test_dataset = random_split(dataset, [train_size, val_size, test_size], generator=split_gen)
 
     # Create DataLoaders
+    worker_kwargs = dict(
+        num_workers=num_workers,
+        pin_memory=torch.cuda.is_available(),
+        persistent_workers=(num_workers > 0),
+    )
+    if num_workers > 0:
+        worker_kwargs['prefetch_factor'] = 4
+
     dataloaders = {
-        'train': DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers),
-        'val': DataLoader(val_dataset, batch_size=min(1024, val_size), shuffle=False, num_workers=num_workers),
-        'test': DataLoader(test_dataset, batch_size=min(1024, test_size), shuffle=False, num_workers=num_workers)
+        'train': DataLoader(train_dataset, batch_size=batch_size, shuffle=True, **worker_kwargs),
+        'val': DataLoader(val_dataset, batch_size=min(1024, val_size), shuffle=False, **worker_kwargs),
+        'test': DataLoader(test_dataset, batch_size=min(1024, test_size), shuffle=False, **worker_kwargs)
     }
 
     return dataloaders
