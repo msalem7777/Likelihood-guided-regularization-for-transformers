@@ -34,11 +34,28 @@ class BBBLinear(nn.Module):
             if self.log_std_bias is not None:
                 self.log_std_bias.requires_grad = False
 
+        # Cache std tensors when frozen (log_std is constant, exp() need not be recomputed per forward)
+        self.freeze_std = freeze_std
+        if freeze_std:
+            self.register_buffer('_std_weight_cached', torch.exp(self.log_std_weight.detach()))
+            if self.log_std_bias is not None:
+                self.register_buffer('_std_bias_cached', torch.exp(self.log_std_bias.detach()))
+        self.debug_checks = False
+
         # Epoch tracker to adjust behavior
         self.epoch_tracker = epoch_tracker
         # Placeholder for custom mask (set in training loop)
         self.custom_mask = None
         self.custom_mask_prob = None
+
+    def _get_stds(self):
+        if self.freeze_std:
+            std_w = self._std_weight_cached
+            std_b = self._std_bias_cached if self.log_std_bias is not None else None
+        else:
+            std_w = torch.exp(self.log_std_weight)
+            std_b = torch.exp(self.log_std_bias) if self.log_std_bias is not None else None
+        return std_w, std_b
 
     def reset_parameters(self) -> None:
         # Initialize mean weights and biases using Kaiming uniform initialization
@@ -59,7 +76,7 @@ class BBBLinear(nn.Module):
         Apply a custom dropout mask to the weights.
         The mask should be the same shape as the mean_weight.
         """
-        self.custom_mask = mask
+        self.custom_mask = mask.to(self.mean_weight.device)
         
     # New method for applying custom dropout probability
     def apply_custom_dropout_prob(self, mask: torch.Tensor):
@@ -67,75 +84,48 @@ class BBBLinear(nn.Module):
         Apply a custom dropout mask to the weights.
         The mask should be the same shape as the mean_weight.
         """
-        self.custom_mask_prob = mask
-
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        device = self.mean_weight.device
-        current_epoch = self.epoch_tracker.current_epoch if self.epoch_tracker else 'pilot'
-            
-        # Sample standard deviation for the weights
-        std_weight = torch.exp(self.log_std_weight).to(device)
+        self.custom_mask_prob = mask.to(self.mean_weight.device)
         
-        if self.training:   
-            # Sample from the normal distribution centered at the mean weight            
-            sampled_weights = torch.normal(mean=torch.zeros_like(self.mean_weight, device=device),std=std_weight)
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        current_epoch = self.epoch_tracker.current_epoch if self.epoch_tracker else 'pilot'
+
+        if self.training:
+            std_weight, std_bias = self._get_stds()
+            sampled_weights = std_weight * torch.randn_like(self.mean_weight)
+            noisy_mean = self.mean_weight + std_weight * torch.randn_like(self.mean_weight)
 
             if self.custom_mask_prob is not None:
-                # Apply the custom mask (if provided) to the mean_weight
-
                 p = self.custom_mask_prob
-                if not torch.all(torch.isfinite(p)):
+                if self.debug_checks and not torch.all(torch.isfinite(p)):
                     print(p)
                     raise RuntimeError("❌ custom_mask_prob contains NaNs or Infs")
 
-                m_min, m_max, m_mean = p.min().item(), p.max().item(), p.mean().item()
-                # print(f"[Mask Check] mask ∈ [{m_min:.4f}, {m_max:.4f}], mean = {m_mean:.4f}")
-
-                # if m_mean > 0.99:
-                #     # print("⚠️ Mask is nearly all 1s — might be dropping everything")
-                # elif m_mean < 0.01:
-                #     # print("⚠️ Mask is nearly all 0s — might be keeping everything")
-
-                binary_mask = 1-torch.bernoulli(self.custom_mask_prob.to(device).view(self.custom_mask_prob.shape))
-                prob_mask = 1-self.custom_mask_prob.to(device)
                 if current_epoch == "fine-tuning":
-                    weight = (self.mean_weight + std_weight * torch.randn_like(self.mean_weight, device=device)) * prob_mask + sampled_weights * (1 - prob_mask)
+                    prob_mask = 1 - p
+                    weight = noisy_mean * prob_mask + sampled_weights * (1 - prob_mask)
                 else:
-                    weight = (self.mean_weight + std_weight * torch.randn_like(self.mean_weight, device=device)) * binary_mask + sampled_weights * (1 - binary_mask)
-
+                    binary_mask = 1 - torch.bernoulli(p)
+                    weight = noisy_mean * binary_mask + sampled_weights * (1 - binary_mask)
             else:
-                # Create a binary mask to apply DropConnect (randomly keep or "drop" weights)
-                binary_mask = 1 - torch.bernoulli(torch.full_like(self.mean_weight, self.p))
-                prob_mask = 1-self.p
                 if current_epoch == "fine-tuning":
-                    weight = (self.mean_weight + std_weight * torch.randn_like(self.mean_weight, device=device)) * prob_mask + sampled_weights * (1 - prob_mask)        
+                    prob_mask = 1 - self.p
+                    weight = noisy_mean * prob_mask + sampled_weights * (1 - prob_mask)
                 else:
-                    weight = (self.mean_weight + std_weight * torch.randn_like(self.mean_weight, device=device)) * binary_mask + sampled_weights * (1 - binary_mask)        
+                    binary_mask = 1 - torch.bernoulli(torch.full_like(self.mean_weight, self.p))
+                    weight = noisy_mean * binary_mask + sampled_weights * (1 - binary_mask)
+
+            if self.mean_bias is not None:
+                bias = self.mean_bias + std_bias * torch.randn_like(self.mean_bias)
+            else:
+                bias = None
         else:
-            # In evaluation mode, use weighted means
-            # mvn_0 = torch.normal(0, std_weight).to(device)
-            # mvn_M = self.mean_weight + std_weight * torch.randn_like(self.mean_weight, device=device)
-        
-            # Apply custom mask during evaluation if available
+            # Evaluation: deterministic weighted means
             if self.custom_mask_prob is not None:
-                weight =  (1 - self.custom_mask_prob.to(device)) * self.mean_weight
+                weight = (1 - self.custom_mask_prob) * self.mean_weight
             else:
-             # Weighted sum based on p
-                weight = (1 - self.p) * self.mean_weight   
+                weight = (1 - self.p) * self.mean_weight
+            bias = self.mean_bias  # None if bias=False
 
-        # Handle bias similarly
-        if self.mean_bias is not None:
-            if self.training:
-                
-                std_bias = torch.exp(self.log_std_bias).to(device)
-                bias = (self.mean_bias + std_bias * torch.randn_like(self.mean_bias, device=device))
-                
-            else:
-                bias = self.mean_bias
-        else:
-            bias = None
-                
-        # Apply the linear transformation using the masked weights and bias
         return F.linear(input, weight, bias)
 
     def extra_repr(self) -> str:
