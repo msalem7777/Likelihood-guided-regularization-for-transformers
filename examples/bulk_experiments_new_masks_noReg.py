@@ -50,7 +50,7 @@ def ensure_data(dataset):
 # ─────────────────────────────────────────────────────────────
 DATASETS     = ["mnist", "fashionmnist", "cifar10", "cifar100"]
 # ISING_TYPES  = ["LM_saliency_scores", "diag_saliency_scores", "no_saliency_scores"]
-ISING_TYPES  = ["LM_saliency_scores"]
+ISING_TYPES  = ["no_saliency_scores"]
 VAL_SPLITS   = [0.895, 0.8, 0.60]
 RUNS_PER_CFG = 10                     # 30 seeds each
 
@@ -64,10 +64,10 @@ MODEL_CFG = {
 }
 
 # Base directory for checkpoints of this sweep
-CKPT_ROOT = "./checkpoints_bulk_batchedIsing_new_masks_LM_0.1_both"
+CKPT_ROOT = "./checkpoints_bulk_batchedIsing_new_masks_noReg_0.1_both"
 
 # CSV destination (append mode)
-CSV_PATH  = "bulk_results_all_ising_batchedIsing_new_masks_LM_0.1_both.csv"
+CSV_PATH  = "bulk_results_all_ising_batchedIsing_new_masks_noReg_0.1_both.csv"
 if not os.path.exists(CSV_PATH):
     pd.DataFrame().to_csv(CSV_PATH, index=False)   # create headerless file
 
@@ -90,9 +90,9 @@ def build_args(dataset, ising_type, val_split, seed):
         patience          = 100,
         lambda_weight1    = 1e-6,
         lambda_weight2    = 1e-6,
-        train_epochs      = 20,   # ← match your example if intended
-        ising_epochs      = 5,
-        addtl_ft          = 1,
+        train_epochs      = 26,   # ← match your example if intended
+        ising_epochs      = 0,
+        addtl_ft          = 0,
         ising_type        = ising_type,
         disable_early_stopping = True,
         drop_thresh       = 0.5,

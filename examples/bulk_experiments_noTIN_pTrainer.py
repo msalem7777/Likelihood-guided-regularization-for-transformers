@@ -49,25 +49,24 @@ def ensure_data(dataset):
 #  Fixed experiment grid
 # ─────────────────────────────────────────────────────────────
 DATASETS     = ["mnist", "fashionmnist", "cifar10", "cifar100"]
-# ISING_TYPES  = ["LM_saliency_scores", "diag_saliency_scores", "no_saliency_scores"]
-ISING_TYPES  = ["LM_saliency_scores"]
+ISING_TYPES  = ["no_saliency_scores"]
 VAL_SPLITS   = [0.895, 0.8, 0.60]
 RUNS_PER_CFG = 10                     # 30 seeds each
 
 # Dataset-specific ViT hyper-parameters
 # (feel free to tune patch_size / embed_dim / depth etc.)
 MODEL_CFG = {
-    "mnist"        : dict(img_size=28,  patch_size=7,  num_classes=10,  embed_dim=32, num_heads=4, depth=2),
-    "fashionmnist" : dict(img_size=28,  patch_size=7,  num_classes=10,  embed_dim=32, num_heads=4, depth=2),
-    "cifar10"      : dict(img_size=32,  patch_size=4,  num_classes=10,  embed_dim=64, num_heads=8, depth=2),
-    "cifar100"     : dict(img_size=32,  patch_size=4,  num_classes=100, embed_dim=64, num_heads=8, depth=2),
+    "mnist"        : dict(img_size=28,  patch_size=7,  num_classes=10,  embed_dim=64, num_heads=4, depth=2),
+    "fashionmnist" : dict(img_size=28,  patch_size=7,  num_classes=10,  embed_dim=64, num_heads=4, depth=2),
+    "cifar10"      : dict(img_size=32,  patch_size=4,  num_classes=10,  embed_dim=128,num_heads=8, depth=2),
+    "cifar100"     : dict(img_size=32,  patch_size=4,  num_classes=100, embed_dim=128,num_heads=8, depth=2),
 }
 
 # Base directory for checkpoints of this sweep
-CKPT_ROOT = "./checkpoints_bulk_batchedIsing_new_masks_LM_0.1_both"
+CKPT_ROOT = "./checkpoints_bulk_batchedIsing_noTIN_noES_noReg"
 
 # CSV destination (append mode)
-CSV_PATH  = "bulk_results_all_ising_batchedIsing_new_masks_LM_0.1_both.csv"
+CSV_PATH  = "bulk_results_all_ising_batchedIsing_noTin_noES_noReg.csv"
 if not os.path.exists(CSV_PATH):
     pd.DataFrame().to_csv(CSV_PATH, index=False)   # create headerless file
 
@@ -82,20 +81,20 @@ def build_args(dataset, ising_type, val_split, seed):
         use_multi_gpu     = False,
         device_ids        = [0],
         num_models        = 1,
-        dropout           = 0.1,
-        dropconnect_delta = 0.1,
+        dropout           = 0.0,
+        dropconnect       = 0.2,
         batch_size        = 20,
         learning_rate     = 1e-3,
         kl_pen            = 1e-6,
         patience          = 100,
         lambda_weight1    = 1e-6,
         lambda_weight2    = 1e-6,
-        train_epochs      = 20,   # ← match your example if intended
-        ising_epochs      = 5,
+        train_epochs      = 44,   # ← match your example if intended
+        ising_epochs      = 0,
         addtl_ft          = 1,
         ising_type        = ising_type,
         disable_early_stopping = True,
-        drop_thresh       = 0.5,
+        drop_thresh       = 0.8,
         val_split         = val_split,
         test_split        = 0.10,
         ising_batch       = False,
@@ -107,7 +106,6 @@ def build_args(dataset, ising_type, val_split, seed):
         path              = ".",
         sim_seed          = seed,
         lradj             = "type2",    # ← added
-        mc_samples        = 128
     )
     base.update(MODEL_CFG[dataset])      # patch_size, embed_dim, etc.
     # reproducibility
@@ -187,10 +185,5 @@ def main():
 
 if __name__ == "__main__":
     main()
-    import shutil, datetime
-
-    if os.path.exists(CKPT_ROOT):
-        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        shutil.move(CKPT_ROOT, f"{CKPT_ROOT}_archived_{ts}")
 
 # %%

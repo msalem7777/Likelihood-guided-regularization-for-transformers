@@ -63,13 +63,25 @@ MODEL_CFG = {
     "cifar100"     : dict(img_size=32,  patch_size=4,  num_classes=100, embed_dim=64, num_heads=8, depth=2),
 }
 
-# Base directory for checkpoints of this sweep
-CKPT_ROOT = "./checkpoints_bulk_batchedIsing_new_masks_LM_0.1_both"
+# Optional: override these if needed
+TRAIN_EPOCHS = 40
+ISING_EPOCHS = 10
+ADDTL_FT     = 10
+DROPOUT      = 0.1
+DROPCONN     = 0.1
 
-# CSV destination (append mode)
-CSV_PATH  = "bulk_results_all_ising_batchedIsing_new_masks_LM_0.1_both.csv"
+# Create configuration tag
+epoch_desc = f"train{TRAIN_EPOCHS}_ising{ISING_EPOCHS}_ft{ADDTL_FT}"
+reg_params = f"do{DROPOUT}_dc{DROPCONN}"
+
+# Root directory and CSV path
+TAG = f"{ISING_TYPES[0]}_{epoch_desc}_{reg_params}"
+
+CKPT_ROOT = f"./checkpoints_bulk_{TAG}"
+CSV_PATH  = f"bulk_results_{TAG}.csv"
+
 if not os.path.exists(CSV_PATH):
-    pd.DataFrame().to_csv(CSV_PATH, index=False)   # create headerless file
+    pd.DataFrame().to_csv(CSV_PATH, index=False)  # Create empty CSV if needed
 
 # ─────────────────────────────────────────────────────────────
 def build_args(dataset, ising_type, val_split, seed):
@@ -82,17 +94,17 @@ def build_args(dataset, ising_type, val_split, seed):
         use_multi_gpu     = False,
         device_ids        = [0],
         num_models        = 1,
-        dropout           = 0.1,
-        dropconnect_delta = 0.1,
+        dropout           = DROPOUT,
+        dropconnect_delta = DROPCONN,
         batch_size        = 20,
         learning_rate     = 1e-3,
         kl_pen            = 1e-6,
         patience          = 100,
         lambda_weight1    = 1e-6,
         lambda_weight2    = 1e-6,
-        train_epochs      = 20,   # ← match your example if intended
-        ising_epochs      = 5,
-        addtl_ft          = 1,
+        train_epochs      = TRAIN_EPOCHS,   # ← match your example if intended
+        ising_epochs      = ISING_EPOCHS,
+        addtl_ft          = ADDTL_FT,
         ising_type        = ising_type,
         disable_early_stopping = True,
         drop_thresh       = 0.5,

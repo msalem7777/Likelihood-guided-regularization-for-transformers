@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+data/
+results/
+checkpoints*/
+temp.png
+score_temp.png

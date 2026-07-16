@@ -64,10 +64,10 @@ MODEL_CFG = {
 }
 
 # Base directory for checkpoints of this sweep
-CKPT_ROOT = "./checkpoints_bulk_batchedIsing_new_masks_LM_0.1_both"
+CKPT_ROOT = "./checkpoints_bulk_batchedIsing_new_masks_LM_0.1_both_pseudoclassic"
 
 # CSV destination (append mode)
-CSV_PATH  = "bulk_results_all_ising_batchedIsing_new_masks_LM_0.1_both.csv"
+CSV_PATH  = "bulk_results_all_ising_batchedIsing_new_masks_LM_0.1_both_pseudoclassic.csv"
 if not os.path.exists(CSV_PATH):
     pd.DataFrame().to_csv(CSV_PATH, index=False)   # create headerless file
 
@@ -82,7 +82,7 @@ def build_args(dataset, ising_type, val_split, seed):
         use_multi_gpu     = False,
         device_ids        = [0],
         num_models        = 1,
-        dropout           = 0.1,
+        dropout           = 0.0,
         dropconnect_delta = 0.1,
         batch_size        = 20,
         learning_rate     = 1e-3,
@@ -90,9 +90,9 @@ def build_args(dataset, ising_type, val_split, seed):
         patience          = 100,
         lambda_weight1    = 1e-6,
         lambda_weight2    = 1e-6,
-        train_epochs      = 20,   # ← match your example if intended
-        ising_epochs      = 5,
-        addtl_ft          = 1,
+        train_epochs      = 26,   # ← match your example if intended
+        ising_epochs      = 0,
+        addtl_ft          = 0,
         ising_type        = ising_type,
         disable_early_stopping = True,
         drop_thresh       = 0.5,
