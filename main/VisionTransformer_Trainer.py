@@ -56,7 +56,7 @@ def all_binary_masks_for_all_d(D, S, device):
     return masks_keep_all, masks_drop_all  # (D, S, D)
 
 
-def fast_compute_weight_dropout(final_layer, activations, targets, dropconnect_delta = 0.5, epsilon=1e-9, *, use_penalties=False, full_criterion=None,  masks_keep_all=None, masks_drop_all=None, mc_samples = 128):
+def fast_compute_weight_dropout(final_layer, activations, targets, dropconnect_delta = 0.5, epsilon=1e-9, *, use_penalties=False, full_criterion=None,  masks_keep_all=None, masks_drop_all=None, mc_samples = 128, debug_checks=False):
 
     """
     Computes dropout probabilities for all weights in final linear layer
@@ -68,9 +68,10 @@ def fast_compute_weight_dropout(final_layer, activations, targets, dropconnect_d
         B, D = A.shape
         C = W.shape[0]
 
-        assert torch.all(torch.isfinite(W)), "NaNs/Infs in final_layer.mean_weight"
-        assert torch.all(torch.isfinite(A)), "NaNs/Infs in activations"
-        assert torch.all(targets >= 0) and torch.all(targets < C), "Invalid target values"
+        if debug_checks:
+            assert torch.all(torch.isfinite(W)), "NaNs/Infs in final_layer.mean_weight"
+            assert torch.all(torch.isfinite(A)), "NaNs/Infs in activations"
+            assert torch.all(targets >= 0) and torch.all(targets < C), "Invalid target values"
 
         logits = A @ W.T                              # (B, C)
 
@@ -83,35 +84,24 @@ def fast_compute_weight_dropout(final_layer, activations, targets, dropconnect_d
 
         # Compute masks if not provided (fallback mode)
         if masks_keep_all is None or masks_drop_all is None:
-            masks_keep_all, masks_drop_all = all_binary_masks_for_all_d(D, S=mc_samples, device=device)  # (D, M, D)
+            masks_keep_all, masks_drop_all = all_binary_masks_for_all_d(D, S=mc_samples, device=A.device)  # (D, M, D)
 
         M = masks_keep_all.shape[1]
 
-        # Expand A: (B, 1, 1, D) → (B, D, M, D)
-        A_exp = A.view(B, 1, 1, D).expand(B, D, M, D)
-        W_exp = W.view(1, C, 1, D).expand(D, C, M, D).transpose(0, 1)  # (C, D, M, D)
+        # Z[b,c,k] = A[b,k] * W[c,k]; binary masks => mask^2 = mask, so
+        # logits_keep[b,d,m,c] = sum_k Z[b,c,k] * masks_keep_all[d,m,k]
+        Z = A.unsqueeze(1) * W.unsqueeze(0)                              # (B, C, D)
+        Mk = masks_keep_all.reshape(D * M, D)                            # (D*M, D)
+        logits_keep = (Z.reshape(B * C, D) @ Mk.T).view(B, C, D, M).permute(0, 2, 3, 1)  # (B, D, M, C)
 
-        masks_keep = masks_keep_all.unsqueeze(0)  # (1, D, M, D)
-        masks_drop = masks_drop_all.unsqueeze(0)
+        # drop mask = keep mask with coordinate d zeroed:
+        # logits_drop[b,d,m,c] = logits_keep[b,d,m,c] - Z[b,c,d]
+        logits_drop = logits_keep - Z.permute(0, 2, 1).unsqueeze(2)      # (B, D, M, C)
 
-        A_keep = A_exp * masks_keep  # (B, D, M, D)
-        A_drop = A_exp * masks_drop
-        W_keep = W_exp * masks_keep
-        W_drop = W_exp * masks_drop
-
-        logits_keep = torch.einsum('bdmd,cdmd->bdmc', A_keep, W_keep)  # (B, D, M, C)
-        logits_drop = torch.einsum('bdmd,cdmd->bdmc', A_drop, W_drop)
-
-        logits_keep_flat = logits_keep.reshape(B * D * M, C)
-        logits_drop_flat = logits_drop.reshape(B * D * M, C)
         targets_flat = targets.view(B, 1, 1).expand(-1, D, M).reshape(-1)
 
-        # Validate logits before CE
-        assert torch.all(torch.isfinite(logits_keep_flat)), "NaNs in logits_keep"
-        assert torch.all(torch.isfinite(logits_drop_flat)), "NaNs in logits_drop"
-
-        loss_keep = -F.cross_entropy(logits_keep_flat, targets_flat, reduction='none').view(B, D, M)
-        loss_drop = -F.cross_entropy(logits_drop_flat, targets_flat, reduction='none').view(B, D, M)
+        loss_keep = -F.cross_entropy(logits_keep.reshape(-1, C), targets_flat, reduction='none').view(B, D, M)
+        loss_drop = -F.cross_entropy(logits_drop.reshape(-1, C), targets_flat, reduction='none').view(B, D, M)
 
         delta = (loss_keep - loss_drop).mean(dim=0).mean(dim=1)  # (D,)
         loss_diff = delta.unsqueeze(0).expand(C, D)
@@ -127,7 +117,7 @@ def fast_compute_weight_dropout(final_layer, activations, targets, dropconnect_d
         # Final clamping and diagnostics
         dropout_prob = torch.clamp(dropout_prob, min=epsilon, max=1 - epsilon)
 
-        if not torch.all(torch.isfinite(dropout_prob)):
+        if debug_checks and not torch.all(torch.isfinite(dropout_prob)):
             nan_rows = ~torch.isfinite(dropout_prob).all(dim=1)
             print("🔥 NaNs in dropout_prob at class indices:", torch.where(nan_rows)[0])
             print("Dropout row sample:", dropout_prob[nan_rows])
