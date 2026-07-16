@@ -27,34 +27,25 @@ from utils.early_stopping import EarlyStopping
 from utils.learning_rate import adjust_learning_rate
 from utils.metrics import metric, MAE, MSE, RMSE, MAPE, MSPE, LGLOSS, ACCRCY
 
+
 def all_binary_masks_for_all_d(D, S, device):
     """
     Returns:
-    - masks_keep_all: (D, S, D)
-    - masks_drop_all: (D, S, D)
+    - masks_keep_all: (D, S, D)  (coordinate d forced to 1 in slice [d])
+    - masks_drop_all: (D, S, D)  (coordinate d forced to 0 in slice [d];
+                                  identical to masks_keep_all elsewhere)
     """
-    masks_keep_all = torch.zeros(D, S, D, device=device)
-    masks_drop_all = torch.zeros(D, S, D, device=device)
+    # One draw for all coordinates, then overwrite the diagonal coordinate
+    # per slice. Off-diagonal entries remain i.i.d. Bernoulli(0.5); clone()
+    # preserves the shared-draw property between keep and drop.
+    masks_keep_all = torch.bernoulli(torch.full((D, S, D), 0.5, device=device))
+    d_idx = torch.arange(D, device=device)
+    masks_keep_all[d_idx, :, d_idx] = 1.0
 
-    for d in range(D):
-        masks = torch.bernoulli(torch.full((S, D - 1), 0.5, device=device))  # (S, D-1)
+    masks_drop_all = masks_keep_all.clone()
+    masks_drop_all[d_idx, :, d_idx] = 0.0
 
-        keep = torch.zeros(S, D, device=device)
-        drop = torch.zeros(S, D, device=device)
-
-        keep[:, :d] = masks[:, :d]
-        keep[:, d+1:] = masks[:, d:]
-        keep[:, d] = 1.0
-
-        drop[:, :d] = masks[:, :d]
-        drop[:, d+1:] = masks[:, d:]
-        drop[:, d] = 0.0
-
-        masks_keep_all[d] = keep
-        masks_drop_all[d] = drop
-
-    return masks_keep_all, masks_drop_all  # (D, S, D)
-
+    return masks_keep_all, masks_drop_all
 
 def fast_compute_weight_dropout(final_layer, activations, targets, dropconnect_delta = 0.5, epsilon=1e-9, *, use_penalties=False, full_criterion=None,  masks_keep_all=None, masks_drop_all=None, mc_samples = 128, debug_checks=False):
 
@@ -951,10 +942,7 @@ class VisionTransformerTrainer:
                     self.total_maskable = total_masked
 
                 # Training logic (core loop)
-                for optimizer in model_optim: # Zero the gradients for each model's optimizer
-                    optimizer.zero_grad()
-                    
-                shuffled_indices = list(range(len(self.models))) 
+                shuffled_indices = list(range(len(self.models)))
                 random.shuffle(shuffled_indices)
 
                 for model_idx in shuffled_indices: # Loop over models randomly and process batches
@@ -963,7 +951,7 @@ class VisionTransformerTrainer:
     
                     # Compute loss for each model
                     loss = criterion(pred, batch_y)
-                    train_loss[model_idx].append(loss.item())
+                    train_loss[model_idx].append(loss.detach())
 
                     if ((epoch == (self.args.train_epochs-1)) and (i == (train_steps-1))) or ((self.current_epoch == 'ising') and (i == (train_steps-1))):
                         
@@ -991,14 +979,17 @@ class VisionTransformerTrainer:
                                     # Store saliency scores
                                     saliency_scores[name] = (0.5 * diag_hessian * (param ** 2)).detach()
 
-                    for optimizer in model_optim:
-                        optimizer.zero_grad() # zero the gradients
+                    # NOTE: with the cross-model similarity penalty (num_models > 1), each
+                    # backward writes grads into ALL models; correctness relies on
+                    # zero_grad(model_idx) running immediately before this model's
+                    # backward + step.
+                    model_optim[model_idx].zero_grad()
 
                     loss.backward()  # Backpropagation
                     model_optim[model_idx].step()  # Update model
 
                 if (i + 1) % 100 == 0:
-                    avg_losses = [np.mean(losses) for losses in train_loss]
+                    avg_losses = [torch.stack(losses).mean().item() for losses in train_loss]
                     print(f"\titers: {i + 1}, epoch: {epoch + 1} | loss for each model: {avg_losses}")
                     speed = (time.time() - time_now) / iter_count
                     print('\tspeed: {:.4f}s/iter'.format(speed))
@@ -1008,7 +999,7 @@ class VisionTransformerTrainer:
             print("Epoch: {} cost time: {}".format(epoch+1, time.time()-epoch_time))
 
             # Validation and early stopping          
-            train_loss_avg = [np.mean(losses) for losses in train_loss]
+            train_loss_avg = [torch.stack(losses).mean().item() for losses in train_loss]
             vali_loss_avg = [self.vali(vali_loader, criterion, model) for model in self.models]  # Pass each model
             test_loss_avg = [self.vali(test_loader, criterion, model) for model in self.models]  # Pass each model
 
@@ -1025,11 +1016,6 @@ class VisionTransformerTrainer:
             # Adjust learning rates for each optimizer
             for optimizer in model_optim:
                 adjust_learning_rate(optimizer, epoch + 1, self.args)
-
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            gc.collect()
 
         # Save all M models separately
         for idx, model in enumerate(self.models):
