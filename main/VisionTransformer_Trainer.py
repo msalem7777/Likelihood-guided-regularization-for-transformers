@@ -27,6 +27,11 @@ from utils.early_stopping import EarlyStopping
 from utils.learning_rate import adjust_learning_rate
 from utils.metrics import metric, MAE, MSE, RMSE, MAPE, MSPE, LGLOSS, ACCRCY
 
+# Full float32 matmul precision: disable TF32 so results are bit-comparable
+# across GPU generations and with CPU reference computations.
+torch.backends.cuda.matmul.allow_tf32 = False
+torch.backends.cudnn.allow_tf32 = False
+
 
 def all_binary_masks_for_all_d(D, S, device):
     """
@@ -330,7 +335,16 @@ class VisionTransformerTrainer:
     def _select_criterion(self):
 
         task_criterion = nn.CrossEntropyLoss()
-    
+
+        # Cache parameter pairings once; re-running named_parameters() + zip
+        # per batch is pure overhead (params are the same objects every batch).
+        param_pairs = []
+        if self.args.num_models > 1:
+            named = [list(m.named_parameters()) for m in self.models]
+            for i in range(len(self.models)):
+                for j in range(i + 1, len(self.models)):
+                    param_pairs.append((named[i], named[j]))
+
         def criterion(predictions, targets):
             # Make sure targets are of type float for BCEWithLogitsLoss
             targets = targets.long()
@@ -342,9 +356,8 @@ class VisionTransformerTrainer:
     
             # Multi-model case: add similarity penalty
             if self.args.num_models > 1:
-                for i in range(len(self.models)):
-                    for j in range(i + 1, len(self.models)):
-                        for (name_i, param_i), (name_j, param_j) in zip(self.models[i].named_parameters(), self.models[j].named_parameters()):
+                for named_i, named_j in param_pairs:
+                    for (name_i, param_i), (name_j, param_j) in zip(named_i, named_j):
                             # Compute pairwise similarity penalty between models
                             if self.args.sim_loss_type == 'root':
                                 n = self.args.root  # Replace with any root
@@ -352,10 +365,21 @@ class VisionTransformerTrainer:
                             elif self.args.sim_loss_type == 'log':
                                 similarity_penalty += torch.log(torch.norm(param_i - param_j) + 1e-6)  # Log of the Euclidean distance
                             elif self.args.sim_loss_type == 'orth':
-                                param_i_vector = param_i.view(-1).unsqueeze(1)  # or param_i.flatten()
-                                param_j_vector = param_j.view(-1).unsqueeze(1)  # or param_j.flatten()
-                                identity = torch.eye(param_i_vector.size(0), device=param_i_vector.device)
-                                similarity_penalty += torch.norm(torch.mm(param_i_vector, param_j_vector.T) - identity, p=2) ** 2   # Log of the Euclidean distance
+                                # param_i_vector = param_i.view(-1).unsqueeze(1)  # or param_i.flatten()
+                                # param_j_vector = param_j.view(-1).unsqueeze(1)  # or param_j.flatten()
+                                # identity = torch.eye(param_i_vector.size(0), device=param_i_vector.device)
+                                # similarity_penalty += torch.norm(torch.mm(param_i_vector, param_j_vector.T) - identity, p=2) ** 2   # Log of the Euclidean distance
+                                
+                                # TODO(design pass needed): the original formulation built
+                                # torch.eye(numel) per pair per batch (O(numel^2) memory,
+                                # ~1GB+ for MLP layers) and compares a rank-1 outer product
+                                # to identity, which is never small. Algebraic identity for
+                                # the original quantity, if ever needed:
+                                # ||v w^T - I||_F^2 = ||v||^2 ||w||^2 - 2 v.w + numel
+                                raise NotImplementedError(
+                                    "sim_loss_type='orth' is disabled pending redesign; "
+                                    "see comment above."
+                                )                                
     
             # Total loss = task loss - lambda_weight1 * similarity_penalty + lambda_weight2 * orthogonal_penalty
             lambda_weight1 = self.args.lambda_weight1
