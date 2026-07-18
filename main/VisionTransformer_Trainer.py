@@ -123,11 +123,42 @@ def fast_compute_weight_dropout(final_layer, activations, targets, dropconnect_d
 
         return dropout_prob.detach()
 
-def compute_diag_hessian_element(idx, grad1_flat, param, device):
-    grad2 = torch.autograd.grad(
-        grad1_flat[idx], param, retain_graph=True
-    )[0]
-    return grad2.view(-1)[idx].item()
+
+def exact_hessian_diag(loss, param, block_size=1024):
+    """
+    Exact diagonal of the Hessian of `loss` w.r.t. `param`, computed via
+    batched Hessian-vector products against one-hot basis blocks.
+    Identical values to the per-element double-backward loop, with
+    ~numel/block_size graph traversals instead of numel.
+    """
+    grad1 = torch.autograd.grad(loss, param, create_graph=True)[0]
+    g1_flat = grad1.reshape(-1)
+    n = g1_flat.numel()
+    diag = torch.empty(n, device=g1_flat.device, dtype=g1_flat.dtype)
+
+    for start in range(0, n, block_size):
+        end = min(start + block_size, n)
+        b = end - start
+        # One-hot basis block: (b, n)
+        basis = torch.zeros(b, n, device=g1_flat.device, dtype=g1_flat.dtype)
+        basis[torch.arange(b, device=g1_flat.device), torch.arange(start, end, device=g1_flat.device)] = 1.0
+        # Batched HVPs: rows of the Hessian for indices [start, end)
+        grad2 = torch.autograd.grad(
+            g1_flat, param, grad_outputs=basis,
+            retain_graph=True, is_grads_batched=True,
+        )[0].reshape(b, -1)
+        # Diagonal entries of those rows
+        diag[start:end] = grad2[torch.arange(b, device=g1_flat.device), torch.arange(start, end, device=g1_flat.device)]
+
+    return diag.view_as(param)
+
+# DEPRECATED #
+
+# def compute_diag_hessian_element(idx, grad1_flat, param, device):
+#     grad2 = torch.autograd.grad(
+#         grad1_flat[idx], param, retain_graph=True
+#     )[0]
+#     return grad2.view(-1)[idx].item()
 
 class VisionTransformerTrainer:
 
@@ -201,8 +232,8 @@ class VisionTransformerTrainer:
                 num_heads=self.args.num_heads,
                 depth=self.args.depth,
                 dropout=initial_dropout,
-                p_bayes=self.args.p_bayes,
-                dropconnect_delta=self.args.dropconnect_delta,
+                p_bayes=getattr(self.args, 'p_bayes', 0.0),
+                dropconnect_delta=getattr(self.args, 'dropconnect_delta', 0.5),
                 device=self.device,
                 epoch_tracker=self,  # Pass the instance for epoch tracking
             ).float()
@@ -600,7 +631,7 @@ class VisionTransformerTrainer:
                 if hasattr(layer, "avg_dropout_mask"):
                     keep_prob = 1 - layer.avg_dropout_mask.to(layer.mean_weight.device)
                 else:
-                    keep_prob = torch.full_like(layer.mean_weight, 1 - self.args.p_bayes)
+                    keep_prob = torch.full_like(layer.mean_weight, 1 - getattr(self.args, 'p_bayes', 0.0))
                 layer_keep_probs.append(keep_prob)
 
             try:
@@ -705,7 +736,7 @@ class VisionTransformerTrainer:
             f"_N{train_size}"
         )  
         
-        early_stopping = EarlyStopping(patience=self.args.patience, verbose=True, num_models=self.args.num_models, disable=self.args.disable_early_stopping)
+        early_stopping = EarlyStopping(patience=self.args.patience, verbose=True, num_models=self.args.num_models, disable=getattr(self.args, 'disable_early_stopping', False))
 
         model_optim = self._select_optimizer()
         criterion =  self._select_criterion()
@@ -775,7 +806,7 @@ class VisionTransformerTrainer:
                     act = self.layer_inputs[(model, final_layer_name)]   # shape [B*T, D]
 
                     D = final_layer.mean_weight.shape[1]
-                    masks_keep_all, masks_drop_all = all_binary_masks_for_all_d(D, self.args.mc_samples, device=act.device)  # (D, M, D)
+                    masks_keep_all, masks_drop_all = all_binary_masks_for_all_d(D, getattr(self.args, 'mc_samples', 128), device=act.device)  # (D, M, D)
 
                     penultimate_act = act.detach()
 
@@ -791,11 +822,11 @@ class VisionTransformerTrainer:
                             final_layer   = final_layer,       # GPU weights
                             activations   = penultimate_act,   # GPU activations
                             targets       = batch_y,           # GPU labels
-                            dropconnect_delta = self.args.dropconnect_delta,    # External Field Parameter
+                            dropconnect_delta = getattr(self.args, 'dropconnect_delta', 0.5),    # External Field Parameter
                             epsilon       = epsilon,
                             masks_keep_all=masks_keep_all,
                             masks_drop_all=masks_drop_all,
-                            mc_samples = self.args.mc_samples
+                            mc_samples = getattr(self.args, 'mc_samples', 128)
                         )
 
                     mask_list.append(mask)                  # keep mask for later
@@ -893,7 +924,8 @@ class VisionTransformerTrainer:
                                 # L_minus_1_dropout_probs = 1 - 1 / (1 + torch.exp(-2 * a_i_tensor + np.log(self.args.dropconnect_delta/(1-self.args.dropconnect_delta)) + epsilon))
                                 
                                 # Compute stable dropout probs (still sigmoid-like function)
-                                delta_term = np.log(self.args.dropconnect_delta / (1 - self.args.dropconnect_delta))
+                                dc_delta = getattr(self.args, 'dropconnect_delta', 0.5)
+                                delta_term = np.log(dc_delta / (1 - dc_delta))
                                 L_minus_1_dropout_probs = 1 - 1 / (1 + torch.exp(-2 * a_i_tensor + delta_term + epsilon))
 
                                 # Final cleanup: prevent NaNs and keep probs in safe [ε, 1-ε] range
@@ -942,7 +974,7 @@ class VisionTransformerTrainer:
                         avg_mask = torch.stack(masks).mean(0)
 
                         # Threshold to binary mask at 0.5
-                        binary_mask = (avg_mask > self.args.drop_thresh).float()
+                        binary_mask = (avg_mask > getattr(self.args, 'drop_thresh', 0.5)).float()
 
                         for model in self.models:
                             mod = model
@@ -960,7 +992,7 @@ class VisionTransformerTrainer:
                                 if hasattr(module, "avg_dropout_mask"):
                                     mask = module.avg_dropout_mask
                                     expec_dropped += (mask > 0.5).sum().item()
-                                    hard_dropped += (mask > self.args.drop_thresh).sum().item()
+                                    hard_dropped += (mask > getattr(self.args, 'drop_thresh', 0.5)).sum().item()
                                     total_masked += mask.numel()
 
                         print(f"Ising expected dropped params: {expec_dropped} "
@@ -993,25 +1025,12 @@ class VisionTransformerTrainer:
                         
                         if self.args.ising_type == "diag_saliency_scores":
                             saliency_scores = {}  # Dictionary to store saliency scores for each parameter
-                            # My Hessian implementation
                             for name, param in model.named_parameters():
                                 if 'mean_weight' in name:
-                                    # Zero gradients before backward pass
-                                    for optimizer in model_optim:
-                                        optimizer.zero_grad()
-                                    
-                                    # Compute first derivative
-                                    grad1 = torch.autograd.grad(loss, param, create_graph=True)[0]
-        
-                                    # Initialize diagonal Hessian
-                                    diag_hessian = torch.zeros_like(param)
-                            
-                                    # Compute diagonal of Hessian
-                                    for idx in range(param.numel()):
-                                        # Compute the second derivative
-                                        grad2 = torch.autograd.grad(grad1.view(-1)[idx], param, retain_graph=True)[0]
-                                        diag_hessian.view(-1)[idx] = grad2.view(-1)[idx]
-                                    
+                                    diag_hessian = exact_hessian_diag(
+                                        loss, param,
+                                        block_size=getattr(self.args, 'hessian_block_size', 1024),
+                                    )
                                     # Store saliency scores
                                     saliency_scores[name] = (0.5 * diag_hessian * (param ** 2)).detach()
 
