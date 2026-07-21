@@ -17,3 +17,16 @@ check_patch*.py
 /tiny-imagenet-200/
 /bulk_results_*.csv
 /checkpoints_*/
+
+/examples/analysis_results/
+
+/archive/
+/results_archive/
+/examples/analysis_results/
+/visualization_*.png
+/data_loader/cifar_downloader.py
+/data_loader/mnist_fmnist_downloader.py
+/data_loader/tinyimage_downloader.py
+/examples/experiment_evaluation.py
+/examples/radar_plots_v2.py
+/examples/sample_visualization_v2.py
