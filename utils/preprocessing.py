@@ -1,7 +1,21 @@
+"""DEPRECATED. Unused by the current ViT pipeline.
+
+StandardScaler and the arg/string helpers are retained for reuse but are not
+called anywhere in the ViT training/eval path. Kept for provenance and may be
+removed in a future cleanup.
+"""
+import warnings
+
 import torch
+import json
 
 class StandardScaler():
     def __init__(self, mean=0., std=1.):
+        warnings.warn(
+            "utils.preprocessing.StandardScaler is deprecated and unused by the ViT pipeline.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self.mean = mean
         self.std = std
     

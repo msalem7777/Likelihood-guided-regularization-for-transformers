@@ -21,8 +21,7 @@ import torch
 from argparse import Namespace
 from tqdm.auto import tqdm
 from main.VisionTransformer_Trainer import VisionTransformerTrainer
-from data_loader.cifar_downloader import *
-from data_loader.mnist_fmnist_downloader import *
+
 
 # ─────────────────────────────────────────────────────────────
 #  CONFIG — the only block you edit per experiment
@@ -55,22 +54,15 @@ CSV_PATH  = f"bulk_results_{TAG}.csv"
 # ─────────────────────────────────────────────────────────────
 
 def ensure_data(dataset):
-    """Skip downloading if known file/folder already exists."""
-    expected_paths = {
-        "mnist":        "./mnist/MNIST/raw/train-images-idx3-ubyte",
-        "fashionmnist": "./fashionmnist/FashionMNIST/raw/train-images-idx3-ubyte",
-        "cifar10":      "./cifar10/cifar-10-batches-py/data_batch_1",
-        "cifar100":     "./cifar100/cifar-100-python/train",
-    }
-    if os.path.exists(expected_paths[dataset]):
-        return
-    mod = {
-        "mnist":        "data_loader.mnist_fmnist_downloader",
-        "fashionmnist": "data_loader.mnist_fmnist_downloader",
-        "cifar10":      "data_loader.cifar_downloader",
-        "cifar100":     "data_loader.cifar_downloader",
+    """Download exactly the requested dataset if absent (torchvision is idempotent)."""
+    from torchvision import datasets as tvd
+    ctor = {
+        "mnist":        tvd.MNIST,
+        "fashionmnist": tvd.FashionMNIST,
+        "cifar10":      tvd.CIFAR10,
+        "cifar100":     tvd.CIFAR100,
     }[dataset]
-    importlib.import_module(mod)
+    ctor(root=f"./{dataset}", download=True)
 
 def build_args(dataset, ising_type, val_split, seed):
     base = dict(
@@ -109,7 +101,7 @@ def build_args(dataset, ising_type, val_split, seed):
         split_seed        = seed if SPLIT_SEED_FOLLOWS_RUN else 42,
         lradj             = "type2",
         mc_samples        = 128,
-        hessian_block_size = 1024,
+        hessian_block_size = 256,
     )
     base.update(MODEL_CFG[dataset])
     torch.manual_seed(seed)

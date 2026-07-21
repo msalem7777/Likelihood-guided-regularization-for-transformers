@@ -1108,10 +1108,9 @@ class VisionTransformerTrainer:
         self._run_stats["test_err"]  = [100 - a for a in test_acc]
 
         # Parameter counts & Ising statistics -----------------------------
-        # `self.total_params` is set during the last Ising batch;
-        # fall back to a simple count if Ising wasn’t run.
-        total_params = getattr(self, "total_params",
-                               sum(p.numel() for p in self.models[0].parameters()))
+        # Full parameter count (unaffected by masking; pruning is tracked
+        # separately below via ising_dropped / total_potential).
+        total_params = sum(p.numel() for p in self.models[0].parameters())
         self._run_stats["num_parameters"] = total_params
         self._run_stats["ising_expected_dropped"]  = getattr(self, "ising_expec_params", 0)
         self._run_stats["ising_dropped"]  = getattr(self, "ising_params", 0)

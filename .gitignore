@@ -5,3 +5,15 @@ results/
 checkpoints*/
 temp.png
 score_temp.png
+
+# local-only regression checks (not tracked)
+check_patch*.py
+
+# datasets & sweep outputs (local only)
+/mnist/
+/fashionmnist/
+/cifar10/
+/cifar100/
+/tiny-imagenet-200/
+/bulk_results_*.csv
+/checkpoints_*/

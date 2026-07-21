@@ -10,8 +10,8 @@ from sklearn.metrics import confusion_matrix, accuracy_score, precision_score, r
 from sklearn.calibration import calibration_curve
 #%%
 # ---- Set these variables directly ----
-ckpt_root = Path("C:/My Files/repos/Likelihood-guided-regularization-for-transformers")  # <-- set this to your checkpoint folder
-out_dir = Path("./analysis_results")      # <-- set this to your desired output folder
+ckpt_root = Path(".")                          # run this file from the repo root
+out_dir   = Path("./examples/analysis_results")
 pattern = "*.csv"                        # <-- adjust if needed
 
 out_dir.mkdir(exist_ok=True, parents=True)

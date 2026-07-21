@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 # coding: utf-8
 
+# LEGACY: superseded by VisionTransformer_Trainer.py; kept for reproducing pre-<date> results.
+
 # In[1]:
 
 
@@ -835,3 +837,5 @@ class pVisionTransformerTrainer:
 
         return self.models
 
+
+# %%
