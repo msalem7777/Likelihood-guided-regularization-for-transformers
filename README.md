@@ -11,7 +11,7 @@ This repository accompanies the paper *"Likelihood-guided Regularization in Atte
 CIFAR-100.
 
 <p align="center">
-  <img src="./pic/LBRT.png" height="520" alt="Model architecture" />
+  <img src="./figs/LBRT.png" height="520" alt="Model architecture" />
   <br>
   <b>Figure 1.</b> Two-stage attention with layer-to-layer backpropagation of the Ising dropout
   masks. Masks are learned from the likelihood at the final layer, then propagated backward through
@@ -165,38 +165,22 @@ Likelihood-guided-regularization-for-transformers/
 ├── data_loader/
 │   ├── dataloader_master.py       # get_vit_dataloaders: seeded train/val/test splits;
 │   │                             #   called by the trainer's _get_data / _get_data_ising
-│   ├── mnist_fmnist_downloader.py # One-shot MNIST/Fashion-MNIST download; run once (or auto-run
-│   │                             #   by the canonical runner's ensure_data) before training
-│   ├── cifar_downloader.py        # One-shot CIFAR-10/100 download; same usage as above
-│   └── tinyimage_downloader.py    # One-shot Tiny-ImageNet download; optional, larger benchmark
+│   └── __init__.py                # exposes get_vit_dataloaders / To3Channels
 │
-├── utils/                         # Helpers consumed by the trainer / analysis
+├── utils/                         # Helpers consumed by the trainer
 │   ├── early_stopping.py          #   EarlyStopping — used in train() to checkpoint per phase and
 │   │                             #   halt the pilot/fine-tune phases (kept always-on during ising)
 │   ├── learning_rate.py           #   adjust_learning_rate — called at each epoch end in train()
 │   │                             #   to apply the chosen step schedule (lradj type1..type7)
-│   ├── metrics.py                 #   ACCRCY/LGLOSS/metric — used by _calc_accuracy, evaluate, and
-│   │                             #   radar_plots to score predictions
+│   ├── metrics.py                 #   ACCRCY/LGLOSS/metric — used by _calc_accuracy and evaluate
 │   └── preprocessing.py           #   DEPRECATED — StandardScaler + arg/string helpers, unused by
 │                                 #   the ViT pipeline; retained for reuse, warns on use
 │
 ├── examples/
-│   ├── bulk_experiments_canonical.py  # ⭐ Canonical sweep runner — edit its CONFIG block and run;
-│   │                                 #   the entry point for reproducing every experiment
-│   ├── experiment_evaluation.py       # Post-hoc: macro metrics + calibration/entropy from the
-│   │                                 #   prediction CSVs a sweep produces
-│   ├── radar_plots_v2.py              # Renders the per-dataset radar charts in the paper
-│   ├── sample_visualization_v2.py     # Renders the dataset sample grids (Figs. S1–S4)
-│   └── analysis_results/              # Generated figures & aggregate CSVs
+│   └── bulk_experiments_canonical.py  # ⭐ Canonical sweep runner — edit its CONFIG block and run;
+│                                     #   the single entry point for reproducing the experiments
 │
-├── archive/                       # Frozen for provenance — superseded, not maintained
-│   ├── pVisionTransformer_Trainer.py  #   Pre-canonical "pilot" trainer
-│   ├── bulk_experiments*.py           #   Pre-canonical sweep-script family
-│   ├── radar_plots.py                 #   v1 of the kept radar_plots_v2.py
-│   ├── sample_visualiztion.py         #   v1 of the kept sample_visualiztion_v2.py
-│   └── example_notebook*.ipynb        #   Early exploratory notebooks
-│
-├── pic/LBRT.png                   # Architecture figure (used at the top of this README)
+├── figs/LBRT.png                  # Architecture figure (used at the top of this README)
 ├── requirements.txt
 └── README.md
 ```
@@ -226,13 +210,10 @@ pip install -r requirements.txt
 ## Data
 
 Datasets are downloaded once into per-dataset folders at the repo root
-(`./mnist`, `./fashionmnist`, `./cifar10`, `./cifar100`). The canonical runner calls the right
-downloader automatically the first time (`ensure_data`), or you can pre-fetch manually:
-
-```bash
-python data_loader/mnist_fmnist_downloader.py
-python data_loader/cifar_downloader.py
-```
+(`./mnist`, `./fashionmnist`, `./cifar10`, `./cifar100`). The canonical runner fetches the requested
+dataset automatically on first run via `ensure_data`, which calls the corresponding `torchvision`
+constructor with `download=True` (idempotent — nothing is re-downloaded if already present). No
+manual download step is needed.
 
 ---
 
@@ -283,21 +264,6 @@ Each row of `bulk_results_<TAG>.csv` contains (per model):
 - **Accuracy:** `train_acc`, `val_acc`, `test_acc`, `final_test_accuracy` (+ `*_err` = 100 − acc)
 - **Sparsity:** `num_parameters`, `ising_expected_dropped`, `ising_dropped`, `total_potential`
 - **Budget:** `elapsed_sec`, `peak_gpu_gib`, `resid_gpu_gib`, `resid_gpu_gib_after_gc`
-
----
-
-## Analysis & figures
-
-After a sweep, generate the paper's calibration curves, entropy distributions, and radar plots:
-
-```bash
-python examples/experiment_evaluation.py   # metrics + calibration/entropy (set ckpt_root inside)
-python examples/radar_plots_v2.py          # per-dataset radar charts
-```
-
-Outputs land in `examples/analysis_results/`. Calibration is read from the MC-posterior prediction
-CSVs (`mc_prob_mean_*`, `mc_pred_entropy`); accuracy/precision/recall/F1/FPR are macro-averaged
-one-vs-all, matching the paper's tables.
 
 ---
 
