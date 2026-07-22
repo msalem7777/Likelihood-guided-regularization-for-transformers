@@ -23,7 +23,7 @@ CIFAR-100.
 ## The idea in one paragraph
 
 Standard dropout / DropConnect zero out weights with a *fixed* probability. We instead treat each
-weight's keep/drop indicator as a **binary selection variable** $\xi_{j',j}\in\{0,1\}$ with its own
+weight's keep/drop indicator as a **binary selection variable** $\xi_{j',j}\in\lbrace 0,1\rbrace$ with its own
 posterior, and place a **spike-and-slab prior** on the weight conditioned on that indicator. The
 selection posterior is written as an **Ising model** whose external field is the weight's *saliency*
 — how much the training loss changes when that weight is removed. Weights that don't matter get
@@ -35,16 +35,14 @@ Levenberg–Marquardt Hessian approximation, it falls out of the normal backward
 ## Method / math
 
 Notation: $\mathbf{W}$ = all layer weights, $\boldsymbol{\xi}$ = per-weight binary selection mask,
-$\mathcal D=\{y_n,\mathbf X_n\}_{n=1}^N$ = data.
+$\mathcal D=\lbrace y_n,\mathbf X_n\rbrace_{n=1}^N$ = data.
 
 ### 1. Spike-and-slab prior, indexed by the selection mask
 
 Each weight is drawn from one of two Gaussians depending on its selection variable:
 
 $$
-p(\mathbf W \mid \boldsymbol\xi) \;=\; \prod_{j,j'}
-\xi_{j,j'}\,\mathcal N(\mathbf W; 0,\sigma_1^2) \;+\;
-(1-\xi_{j,j'})\,\mathcal N(\mathbf W; 0,\sigma_2^2), \qquad \sigma_1^2 < \sigma_2^2 .
+p(\mathbf W \mid \boldsymbol\xi) = \prod_{j,j'} \xi_{j,j'} \mathcal N(\mathbf W; 0,\sigma_1^2) + (1-\xi_{j,j'}) \mathcal N(\mathbf W; 0,\sigma_2^2), \qquad \sigma_1^2 < \sigma_2^2 .
 $$
 
 The **spike** ($\sigma_1^2$) pins dropped weights near zero; the **slab** ($\sigma_2^2$) lets kept
@@ -57,13 +55,11 @@ weights move freely. Unlike a single global mixing weight $\pi$, here $\xi_{j,j'
 ### 2. Variational objective (ELBO)
 
 We approximate the intractable joint posterior $p(\mathbf W,\boldsymbol\xi\mid\mathbf X,\mathbf y)$
-with $q(\mathbf W\mid\boldsymbol\xi)\,q(\boldsymbol\xi)$ and maximize the ELBO. After a one-sample
+with $q(\mathbf W\mid\boldsymbol\xi) q(\boldsymbol\xi)$ and maximize the ELBO. After a one-sample
 Monte-Carlo estimate of both integrals, the training objective is
 
 $$
-\min_{q}\; -\sum_{n}\log p\!\left(y_n \mid \mathbf X_n,\widehat{\mathbf W},\widehat{\boldsymbol\xi}\right)
-\;+\;\mathbb{KL}\!\big(q(\mathbf W\mid\widehat{\boldsymbol\xi})\,\|\,p(\mathbf W\mid\boldsymbol\xi)\big)
-\;+\;\mathbb{KL}\!\big(q(\boldsymbol\xi)\,\|\,p(\boldsymbol\xi)\big).
+\min_{q} -\sum_{n}\log p(y_n \mid \mathbf X_n,\widehat{\mathbf W},\widehat{\boldsymbol\xi}) \quad + \quad \mathbb{KL}\big(q(\mathbf W\mid\widehat{\boldsymbol\xi}) \parallel p(\mathbf W\mid\boldsymbol\xi)\big) \quad + \quad \mathbb{KL}\big(q(\boldsymbol\xi) \parallel p(\boldsymbol\xi)\big).
 $$
 
 The first term is ordinary cross-entropy on a masked forward pass; the KL on weights is folded into
@@ -78,9 +74,7 @@ The selection posterior for the weight connecting node $j$ (layer $l$) to node $
 is a logistic (Ising) form:
 
 $$
-q\!\left(\xi^{(l)}_{j',j}=1\right)=
-\left[1+\exp\!\left\{-2\,\frac{\sum_{j''}w_{j'',j'}^2\,\mathbb E_q[\xi^{(l+1)}_{j'',j'}]}{\sum_{j''}w_{j'',j'}^2}
-\;-\;\big(L_j^{+}-L_j^{-}\big)\;-\;\log\tfrac{\delta}{1-\delta}\right\}\right]^{-1}.
+q(\xi^{(l)}_{j',j}=1)= \left[1+\exp\left(-2 \frac{\sum_{j''}w_{j'',j'}^2 \mathbb{E}_q[\xi^{(l+1)}_{j'',j'}]}{\sum_{j''}w_{j'',j'}^2} -(L_j^{+}-L_j^{-})-\log\tfrac{\delta}{1-\delta}\right)\right]^{-1}.
 $$
 
 Two forces set each mask probability:
@@ -104,7 +98,7 @@ Evaluating $L_j^{+}-L_j^{-}$ exactly needs $2^{|\boldsymbol\xi|}$ forward passes
 Taylor-expand the loss around the current optimum (Optimal Brain Damage):
 
 $$
-L_j^{+}-L_j^{-}\;\approx\;\tfrac{\partial^2 L}{\partial w_{j',j}^2}\;=\;\tfrac{\partial^2 L}{\partial a_{j'}^2}\,x_j^2,
+L_j^{+}-L_j^{-} \approx \tfrac{\partial^2 L}{\partial w_{j',j}^2} = \tfrac{\partial^2 L}{\partial a_{j'}^2} x_j^2,
 $$
 
 and propagate the Hessian diagonal with the **Levenberg–Marquardt** recursion, which drops all
