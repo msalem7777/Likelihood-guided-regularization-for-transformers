@@ -119,8 +119,10 @@ $f''(\cdot)$ terms so the saliency comes along with normal backprop at no additi
 | **ising** | `ising_epochs` | Each step: compute saliency, sample masks from the Ising posterior, apply them, backprop. |
 | **fine-tuning** | `addtl_ft` | Freeze the averaged/thresholded mask, restore ordinary dropout, fine-tune. |
 
-The averaged mask is thresholded at `drop_thresh` (default 0.5) to produce the final hard-pruned
-model, and the number of expected/hard-dropped parameters is logged.
+After the Ising phase completes, the per-batch posterior dropout probabilities are averaged and retained
+for posterior prediction. `drop_thresh` (default 0.5) is used to report the corresponding hard-threshold
+pruning count; the thresholded mask is a sparsity summary rather than a replacement for the averaged
+posterior probabilities.
 
 ### 6. Prediction & uncertainty
 
@@ -236,6 +238,7 @@ Key CONFIG knobs:
 | `RUNS_PER_CFG` | number of seeds (0 … N−1) |
 | `TRAIN_EPOCHS` / `ISING_EPOCHS` / `ADDTL_FT` | length of the pilot / ising / fine-tune phases |
 | `DROPCONN` | external field $\delta$ (`dropconnect_delta`) |
+| `posterior_log_std` | fixed Gaussian posterior log-standard-deviation; default `-4.0` |
 | `DROPOUT` / `P_BAYES` | baseline dropout / Bayesian-layer drop probability (for baselines) |
 | `SPLIT_SEED_FOLLOWS_RUN` | `True`: data partition varies per seed; `False`: fixed 42 |
 
@@ -257,7 +260,7 @@ Each row of `bulk_results_<TAG>.csv` contains (per model):
 - **Losses:** `train_error`, `val_error`, `test_error` (final-epoch CE)
 - **Accuracy:** `train_acc`, `val_acc`, `test_acc`, `final_test_accuracy` (+ `*_err` = 100 − acc)
 - **Sparsity:** `num_parameters`, `ising_expected_dropped`, `ising_dropped`, `total_potential`
-- **Budget:** `elapsed_sec`, `peak_gpu_gib`, `resid_gpu_gib`, `resid_gpu_gib_after_gc`
+- **Budget:** `elapsed_sec`, `pilot_sec`, `ising_sec`, `fine_tuning_sec`, `exact_hessian_sec`, `peak_gpu_gib`, `resid_gpu_gib`, `resid_gpu_gib_after_gc`
 
 ---
 
@@ -276,3 +279,9 @@ Each row of `bulk_results_<TAG>.csv` contains (per model):
 The approach is architecture-agnostic and has also been validated on the Crossformer
 (Zhang & Yan, ICLR 2023). We thank the authors of Crossformer, Informer, Autoformer, Pyraformer, and
 FEDformer for their open-source code utilities.
+
+## Reviewer-revision studies
+
+Revision-only controlled studies are defined in `examples/reviewer_experiments.py`; the rationale and
+minimal run matrices are documented in `REVIEWER_REVISION_RUN_PLAN.md`. This keeps reviewer analyses
+separate from the canonical paper-reproduction runner.

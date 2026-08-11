@@ -25,7 +25,7 @@ from transformer_layers.bbb_linear import BBBLinear
 from data_loader.dataloader_master import To3Channels, get_vit_dataloaders
 from utils.early_stopping import EarlyStopping
 from utils.learning_rate import adjust_learning_rate
-from utils.metrics import metric, MAE, MSE, RMSE, MAPE, MSPE, LGLOSS, ACCRCY
+from utils.metrics import metric, MAE, MSE, RMSE, MAPE, MSPE, LGLOSS, ACCRCY, multiclass_calibration_metrics
 
 # Full float32 matmul precision: disable TF32 so results are bit-comparable
 # across GPU generations and with CPU reference computations.
@@ -170,6 +170,8 @@ class VisionTransformerTrainer:
         self.current_epoch = 'pilot'                                        # Initialize epoch tracker
         self._init_run_stats()          # Experiment results tracking
         self._dataloader_cache = {}     # batch_size -> dataloaders dict; built once, reused
+        self._lm_grad_cache = {}       # layer_name -> gradient from one completed forward/backward step
+        self._lm_input_cache = {}      # layer_name -> matching mean input activation from that same step
         
     def set_current_phase(self, phase):
         """
@@ -197,7 +199,11 @@ class VisionTransformerTrainer:
             "num_parameters": None,
             "ising_expected_dropped":  None,
             "ising_dropped":  None,
-            "total_potential":  None
+            "total_potential":  None,
+            "pilot_sec": None,
+            "ising_sec": None,
+            "fine_tuning_sec": None,
+            "exact_hessian_sec": None
         }
 
     def get_run_stats(self):
@@ -234,6 +240,7 @@ class VisionTransformerTrainer:
                 dropout=initial_dropout,
                 p_bayes=getattr(self.args, 'p_bayes', 0.0),
                 dropconnect_delta=getattr(self.args, 'dropconnect_delta', 0.5),
+                posterior_log_std=getattr(self.args, 'posterior_log_std', -4.0),
                 device=self.device,
                 epoch_tracker=self,  # Pass the instance for epoch tracking
             ).float()
@@ -614,6 +621,13 @@ class VisionTransformerTrainer:
 
         for model_idx, model in enumerate(self.models):
             model.eval()
+            # MC Dropout baseline: keep only nn.Dropout modules stochastic while
+            # the rest of the network remains in evaluation mode. BBBLinear
+            # stochasticity is handled explicitly below by sampled weights/masks.
+            if getattr(self.args, 'dropout', 0.0) > 0.0:
+                for module in model.modules():
+                    if isinstance(module, nn.Dropout):
+                        module.train()
 
             mc_pred_labels = np.zeros((n_samples, n_mc), dtype=int)
             mc_probs = np.zeros((n_samples, n_mc, num_classes), dtype=float)
@@ -691,11 +705,70 @@ class VisionTransformerTrainer:
             results_dfs.append(results_df)
         return results_dfs  # One DataFrame per model
 
+    def _finalize_ising_masks(self):
+        """Freeze the posterior mask summary after the Ising phase has completed.
+
+        The stored mask history contains per-batch dropout probabilities. We average
+        those probabilities for posterior prediction and separately report how many
+        connections exceed the configured hard-drop threshold. The thresholded mask
+        is a reporting statistic; the model continues to retain the averaged posterior
+        probabilities, matching the spike-and-slab posterior used for MC prediction.
+        """
+        if getattr(self, "_ising_masks_finalized", False):
+            return
+
+        expec_dropped, hard_dropped, total_masked = 0, 0, 0
+        for layer_name, masks in self._mask_history.items():
+            if not masks:
+                continue
+            avg_mask = torch.stack(masks).mean(0)
+            for model in self.models:
+                mod = model
+                for part in layer_name.split('.'):
+                    mod = mod[int(part)] if part.isdigit() else getattr(mod, part)
+                if hasattr(mod, "avg_dropout_mask"):
+                    mod.avg_dropout_mask.copy_(avg_mask.to(mod.mean_weight.device))
+                else:
+                    mod.register_buffer("avg_dropout_mask", avg_mask.to(mod.mean_weight.device))
+                mod.apply_custom_dropout_prob(mod.avg_dropout_mask)
+
+            expec_dropped += (avg_mask > 0.5).sum().item()
+            hard_dropped += (avg_mask > getattr(self.args, 'drop_thresh', 0.5)).sum().item()
+            total_masked += avg_mask.numel()
+
+        self.ising_expec_params = expec_dropped
+        self.ising_params = hard_dropped
+        self.total_maskable = total_masked
+        self._ising_masks_finalized = True
+
+        if total_masked:
+            print(f"Ising expected dropped params: {expec_dropped} "
+                  f"({100 * expec_dropped / total_masked:.2f}% of {total_masked})")
+            print(f"Ising hard-threshold dropped params: {hard_dropped} "
+                  f"({100 * hard_dropped / total_masked:.2f}% of {total_masked})")
+
+    def evaluate_calibration(self, n_mc=50, n_bins=15, chunk_size=512):
+        """Return ECE, MCE, and Brier score using MC posterior mean probabilities."""
+        result_dfs = self.predict_mc_posterior_weight_sampling_quantiles(
+            n_mc=n_mc,
+            n_quantiles=2,
+            chunk_size=chunk_size,
+        )
+        metrics = []
+        for df in result_dfs:
+            prob_cols = [f'mc_prob_mean_class_{c}' for c in range(self.args.num_classes)]
+            probs = df[prob_cols].to_numpy(dtype=float)
+            true = df['true_label'].to_numpy(dtype=int)
+            metrics.append(multiclass_calibration_metrics(probs, true, n_bins=n_bins))
+        return metrics
+
     def train(self):
 
         self.layer_inputs = {}  # Store inputs for each (model, layer) pair
         self._mask_history = defaultdict(list)   # layer_name ➜ [mask₁, …, maskₙ] (n≤100)
-        avgd_masks = 0
+        self._ising_masks_finalized = False
+        phase_seconds = {'pilot': 0.0, 'ising': 0.0, 'fine-tuning': 0.0}
+        exact_hessian_seconds = 0.0
     
         if self.args.ising_epochs > 0:
             def create_forward_hook(model, layer_name):
@@ -757,6 +830,9 @@ class VisionTransformerTrainer:
                 phase = 'fine-tuning'
             self.set_current_phase(phase)
 
+            if self.args.ising_epochs > 0 and phase == 'fine-tuning' and not self._ising_masks_finalized:
+                self._finalize_ising_masks()
+
             if self.args.ising_epochs > 0 and phase == 'fine-tuning' and epoch == (self.args.train_epochs + self.args.ising_epochs):
                 for model in self.models:
                     core_model = model.module if isinstance(model, nn.DataParallel) else model
@@ -813,8 +889,13 @@ class VisionTransformerTrainer:
                     if self.args.ising_type == "LM_saliency_scores":
                         saliency_scores = {}
                         deda = {}
-                        grad = final_layer.mean_weight.grad  # Already computed during backprop
-                        input_activations = self.layer_inputs[(self.models[0], final_layer_name)].mean(dim=0)
+                        if final_layer_name not in self._lm_grad_cache:
+                            raise RuntimeError(
+                                'LM saliency cache is empty. A completed pilot optimization step is required '
+                                'before entering the Ising phase.'
+                            )
+                        grad = self._lm_grad_cache[final_layer_name]
+                        input_activations = self._lm_input_cache[final_layer_name]
                         deda[final_layer_name] = 2*(grad / (input_activations + epsilon))**2  
                         saliency_scores[final_layer_name] = deda[final_layer_name].clone().detach()
                     
@@ -897,21 +978,11 @@ class VisionTransformerTrainer:
                                 elif self.args.ising_type == "LM_saliency_scores":
                                     curr_param = next_layer.mean_weight
                                     prev_param = layer.mean_weight
-                                    input_activations = self.layer_inputs[(self.models[0], next_layer_name)]
-                
-                                    # Collapse batch and sequence/patch dimensions to get per-unit input magnitude
-                                    if input_activations.dim() == 3:
-                                        # Shape: [batch_size, num_patches, hidden_dim] → mean over 0 and 1 → shape [hidden_dim]
-                                        input_activations = input_activations.mean(dim=(0, 1))
-                                    elif input_activations.dim() == 2:
-                                        # Shape: [batch_size, hidden_dim] → mean over batch
-                                        input_activations = input_activations.mean(dim=0)
-                                    else:
-                                        raise ValueError(f"Unexpected input_activations shape: {input_activations.shape}")
-                                    
-                                    # Make sure it's on the same device as the model parameters
-                                    input_activations = input_activations.to(curr_param.device)
-                                    deda[next_layer_name] = (curr_param.grad / (input_activations + 1e-8))**2  # Compute deda for the current layer
+                                    if next_layer_name not in self._lm_grad_cache:
+                                        raise RuntimeError(f'No matched LM gradient/activation cache for {next_layer_name}')
+                                    input_activations = self._lm_input_cache[next_layer_name].to(curr_param.device)
+                                    cached_grad = self._lm_grad_cache[next_layer_name].to(curr_param.device)
+                                    deda[next_layer_name] = (cached_grad / (input_activations + 1e-8))**2
                                     # Propagate deda by weighting with the square of next layer's weights
                                     deda[next_layer_name] = torch.matmul(deda[next_layer_name].T, torch.matmul(prev_param.T ** 2, deda[layer_name])).T 
                                     saliency_score = 0.5 * deda[next_layer_name].clone().detach() * (curr_param ** 2)
@@ -964,50 +1035,7 @@ class VisionTransformerTrainer:
                         if len(hist) > 100:                    # clamp length
                             hist.pop(0)            
                 
-                # Handle Ising phase-specific computations
-                if (epoch == (self.args.train_epochs + self.args.ising_epochs + self.args.addtl_ft-1)) and (self.args.ising_epochs > 0) and avgd_masks == 0:
-                    avgd_masks = 1
-
-                    for layer_name, masks in self._mask_history.items():
-                        if not masks:                 # skip layers with no history
-                            continue
-                        avg_mask = torch.stack(masks).mean(0)
-
-                        # Threshold to binary mask at 0.5
-                        binary_mask = (avg_mask > getattr(self.args, 'drop_thresh', 0.5)).float()
-
-                        for model in self.models:
-                            mod = model
-                            for part in layer_name.split('.'):      # navigate to layer
-                                mod = mod[int(part)] if part.isdigit() else getattr(mod, part)
-
-                            mod.register_buffer("avg_dropout_mask", avg_mask.to(mod.mean_weight.device))
-                            mod.apply_custom_dropout_prob(mod.avg_dropout_mask)
-                    
-                    # ---------- Ising hard-drop summary based on final masks ----------   NEW
-                    expec_dropped, hard_dropped, total_masked = 0, 0, 0
-                    if self.args.ising_epochs > 0:
-                        for model in self.models:
-                            for name, module in model.named_modules():
-                                if hasattr(module, "avg_dropout_mask"):
-                                    mask = module.avg_dropout_mask
-                                    expec_dropped += (mask > 0.5).sum().item()
-                                    hard_dropped += (mask > getattr(self.args, 'drop_thresh', 0.5)).sum().item()
-                                    total_masked += mask.numel()
-
-                        print(f"Ising expected dropped params: {expec_dropped} "
-                            f"({100 * expec_dropped / total_masked:.2f}% of {total_masked})")
-
-                        print(f"Ising hard-threshold dropped params: {hard_dropped} "
-                            f"({100 * hard_dropped / total_masked:.2f}% of {total_masked})")
-
-                        num_weights = sum(p.numel() for p in self.models[0].parameters())
-                        print(f"Total model parameters: {num_weights}")
-
-                    # Run stats
-                    self.ising_expec_params = expec_dropped
-                    self.ising_params = hard_dropped
-                    self.total_maskable = total_masked
+                # Final mask summaries are frozen only after the Ising phase completes.
 
                 # Training logic (core loop)
                 shuffled_indices = list(range(len(self.models)))
@@ -1027,10 +1055,12 @@ class VisionTransformerTrainer:
                             saliency_scores = {}  # Dictionary to store saliency scores for each parameter
                             for name, param in model.named_parameters():
                                 if 'mean_weight' in name:
+                                    _hessian_t0 = time.perf_counter()
                                     diag_hessian = exact_hessian_diag(
                                         loss, param,
                                         block_size=getattr(self.args, 'hessian_block_size', 1024),
                                     )
+                                    exact_hessian_seconds += time.perf_counter() - _hessian_t0
                                     # Store saliency scores
                                     saliency_scores[name] = (0.5 * diag_hessian * (param ** 2)).detach()
 
@@ -1041,6 +1071,29 @@ class VisionTransformerTrainer:
                     model_optim[model_idx].zero_grad()
 
                     loss.backward()  # Backpropagation
+
+                    # Cache matched gradient/activation pairs for the next LM mask update.
+                    # This avoids mixing a previous-step gradient with current-step activations
+                    # while preserving the no-extra-backward-pass implementation.
+                    if self.args.ising_type == "LM_saliency_scores":
+                        for layer_name, module in model.named_modules():
+                            if not isinstance(module, BBBLinear) or module.mean_weight.grad is None:
+                                continue
+                            hook_key = (model, layer_name)
+                            if hook_key not in self.layer_inputs:
+                                continue
+                            layer_input = self.layer_inputs[hook_key].detach()
+                            if layer_input.dim() == 3:
+                                input_mean = layer_input.mean(dim=(0, 1))
+                            elif layer_input.dim() == 2:
+                                input_mean = layer_input.mean(dim=0)
+                            else:
+                                raise ValueError(
+                                    f"Unexpected LM cache input shape for {layer_name}: {layer_input.shape}"
+                                )
+                            self._lm_grad_cache[layer_name] = module.mean_weight.grad.detach().clone()
+                            self._lm_input_cache[layer_name] = input_mean.detach().clone()
+
                     model_optim[model_idx].step()  # Update model
 
                 if (i + 1) % 100 == 0:
@@ -1051,7 +1104,19 @@ class VisionTransformerTrainer:
                     iter_count = 0
                     time_now = time.time()    
 
-            print("Epoch: {} cost time: {}".format(epoch+1, time.time()-epoch_time))
+            epoch_elapsed = time.time() - epoch_time
+            phase_seconds[phase] += epoch_elapsed
+            print("Epoch: {} cost time: {}".format(epoch+1, epoch_elapsed))
+
+            # If there is no fine-tuning phase, freeze the averaged Ising posterior
+            # immediately after the final Ising epoch so the phase checkpoint includes it.
+            if (
+                phase == "ising"
+                and self.args.addtl_ft == 0
+                and epoch == self.args.train_epochs + self.args.ising_epochs - 1
+                and not self._ising_masks_finalized
+            ):
+                self._finalize_ising_masks()
 
             # Validation and early stopping          
             train_loss_avg = [torch.stack(losses).mean().item() for losses in train_loss]
@@ -1071,6 +1136,9 @@ class VisionTransformerTrainer:
             # Adjust learning rates for each optimizer
             for optimizer in model_optim:
                 adjust_learning_rate(optimizer, epoch + 1, self.args)
+
+        if self.args.ising_epochs > 0 and not self._ising_masks_finalized:
+            self._finalize_ising_masks()
 
         # Save all M models separately
         for idx, model in enumerate(self.models):
@@ -1115,6 +1183,10 @@ class VisionTransformerTrainer:
         self._run_stats["ising_expected_dropped"]  = getattr(self, "ising_expec_params", 0)
         self._run_stats["ising_dropped"]  = getattr(self, "ising_params", 0)
         self._run_stats["total_potential"]  = getattr(self, "total_maskable", 0)
+        self._run_stats["pilot_sec"] = phase_seconds["pilot"]
+        self._run_stats["ising_sec"] = phase_seconds["ising"]
+        self._run_stats["fine_tuning_sec"] = phase_seconds["fine-tuning"]
+        self._run_stats["exact_hessian_sec"] = exact_hessian_seconds
 
         return self.models
 

@@ -10,7 +10,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, dim, heads, dropout=0.0, p_bayes = 0.0, dropconnect_delta = 0.5):
+    def __init__(self, dim, heads, dropout=0.0, p_bayes = 0.0, dropconnect_delta = 0.5, posterior_log_std=-4.0):
         super(MultiHeadAttention, self).__init__()
         
         self.dim = dim
@@ -21,12 +21,12 @@ class MultiHeadAttention(nn.Module):
         assert self.head_dim * heads == dim, "Embedding dimension must be divisible by number of heads"
         
         # Linear layers for queries, keys, and values (using BBBLinear)
-        self.query = BBBLinear(dim, dim, p = p_bayes)
-        self.key = BBBLinear(dim, dim, p = p_bayes)
-        self.value = BBBLinear(dim, dim, p = p_bayes)
+        self.query = BBBLinear(dim, dim, p=p_bayes, posterior_log_std=posterior_log_std)
+        self.key = BBBLinear(dim, dim, p=p_bayes, posterior_log_std=posterior_log_std)
+        self.value = BBBLinear(dim, dim, p=p_bayes, posterior_log_std=posterior_log_std)
         
         # Output linear layer (using BBBLinear)
-        self.out_projection = BBBLinear(dim, dim, p = p_bayes)
+        self.out_projection = BBBLinear(dim, dim, p=p_bayes, posterior_log_std=posterior_log_std)
         
         # Dropout layer
         self.dropout = nn.Dropout(dropout)
@@ -64,20 +64,20 @@ class MultiHeadAttention(nn.Module):
         return out
 
 class TransformerEncoderLayerWithBBB(nn.Module):
-    def __init__(self, embed_dim, num_heads, mlp_ratio=16.0, dropout=0.0, p_bayes = 0.0, dropconnect_delta = 0.5, device=torch.device("cuda" if torch.cuda.is_available() else "cpu")):
+    def __init__(self, embed_dim, num_heads, mlp_ratio=16.0, dropout=0.0, p_bayes = 0.0, dropconnect_delta = 0.5, posterior_log_std=-4.0, device=torch.device("cuda" if torch.cuda.is_available() else "cpu")):
         super(TransformerEncoderLayerWithBBB, self).__init__()
 
         self.norm1 = nn.LayerNorm(embed_dim)
         
-        self.self_attn = MultiHeadAttention(embed_dim, num_heads, dropout=dropout, p_bayes=p_bayes, dropconnect_delta=dropconnect_delta)
+        self.self_attn = MultiHeadAttention(embed_dim, num_heads, dropout=dropout, p_bayes=p_bayes, dropconnect_delta=dropconnect_delta, posterior_log_std=posterior_log_std)
 
         self.norm2 = nn.LayerNorm(embed_dim)
         
         self.mlp = nn.Sequential(
-            BBBLinear(embed_dim, int(embed_dim * mlp_ratio), p = p_bayes),
+            BBBLinear(embed_dim, int(embed_dim * mlp_ratio), p=p_bayes, posterior_log_std=posterior_log_std),
             nn.GELU(),
             nn.Dropout(dropout),
-            BBBLinear(int(embed_dim * mlp_ratio), embed_dim, p = p_bayes),
+            BBBLinear(int(embed_dim * mlp_ratio), embed_dim, p=p_bayes, posterior_log_std=posterior_log_std),
             nn.Dropout(dropout),
         )
 
@@ -106,6 +106,7 @@ class VisionTransformerWithBBB(nn.Module):
         dropout=0.0,
         p_bayes=0.0,
         dropconnect_delta=0.5,
+        posterior_log_std=-4.0,
         device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
         epoch_tracker=None
     ):
@@ -120,13 +121,13 @@ class VisionTransformerWithBBB(nn.Module):
         self.epoch_tracker = epoch_tracker
 
         # Patch Embedding Layer
-        self.patch_embedding = BBBLinear(3 * patch_size * patch_size, embed_dim, p = p_bayes)
+        self.patch_embedding = BBBLinear(3 * patch_size * patch_size, embed_dim, p=p_bayes, posterior_log_std=posterior_log_std)
 
         # Transformer Encoder
         self.encoder = nn.ModuleList(
             [
                 TransformerEncoderLayerWithBBB(
-                    embed_dim, num_heads, mlp_ratio, dropout, p_bayes, dropconnect_delta, device=device
+                    embed_dim, num_heads, mlp_ratio, dropout, p_bayes, dropconnect_delta, posterior_log_std=posterior_log_std, device=device
                 )
                 for _ in range(depth)
             ]
@@ -134,10 +135,10 @@ class VisionTransformerWithBBB(nn.Module):
 
         # Classification Head
         self.classification_head = nn.Sequential(
-            BBBLinear(embed_dim, embed_dim // 2, p = p_bayes),
+            BBBLinear(embed_dim, embed_dim // 2, p=p_bayes, posterior_log_std=posterior_log_std),
             nn.ReLU(),
             nn.Dropout(dropout),
-            BBBLinear(embed_dim // 2, num_classes, p = p_bayes),
+            BBBLinear(embed_dim // 2, num_classes, p=p_bayes, posterior_log_std=posterior_log_std),
         )
 
     def forward(self, x):

@@ -5,7 +5,7 @@ import torch.nn.functional as F
 
 # Defining Bayesian Linear MLP layers
 class BBBLinear(nn.Module):
-    def __init__(self, in_features: int, out_features: int, p: float = 0.0, bias: bool = True, freeze_std: bool = True, device=None, dtype=None, epoch_tracker=None) -> None:
+    def __init__(self, in_features: int, out_features: int, p: float = 0.0, bias: bool = True, freeze_std: bool = True, posterior_log_std: float = -4.0, device=None, dtype=None, epoch_tracker=None) -> None:
         super(BBBLinear, self).__init__()
         factory_kwargs = {'device': device, 'dtype': dtype}
         
@@ -17,6 +17,7 @@ class BBBLinear(nn.Module):
 
         # Mixture probability p (the probability to drop a weight)
         self.p = p
+        self.posterior_log_std = float(posterior_log_std)
         
         if bias:
             # Learnable mean for the bias term
@@ -66,9 +67,9 @@ class BBBLinear(nn.Module):
             nn.init.uniform_(self.mean_bias, -bound, bound)
         
         # Initialize the log standard deviations to small values (e.g., log(0.01))
-        nn.init.constant_(self.log_std_weight, -4.0)  # Small initial std deviation
+        nn.init.constant_(self.log_std_weight, self.posterior_log_std)
         if self.mean_bias is not None:
-            nn.init.constant_(self.log_std_bias, -4.0)
+            nn.init.constant_(self.log_std_bias, self.posterior_log_std)
 
     # New method for applying custom dropout
     def apply_custom_dropout(self, mask: torch.Tensor):
