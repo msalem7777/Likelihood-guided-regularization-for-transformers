@@ -11,6 +11,7 @@ python examples/reviewer_experiments.py --study cifar100_variance
 python examples/reviewer_experiments.py --study efficiency
 python examples/reviewer_experiments.py --study warmstart
 python examples/reviewer_experiments.py --study sensitivity
+python examples/reviewer_experiments.py --study sparse_vd
 
 Smoke test (build cases only; no training):
 python examples/reviewer_experiments.py --study sensitivity --dry-run
@@ -73,6 +74,9 @@ class RunSpec:
     mc_samples: int = 128
     calibration_mc: int = 50
     calibration_bins: int = 15
+    sparse_vd_threshold: float = 3.0
+    sparse_vd_log_sigma_init: float = -5.0
+    sparse_vd_kl_warmup_epochs: int = 15
 
 
 def train_samples_to_val_split(dataset: str, train_samples: int, test_split: float = 0.10) -> float:
@@ -127,6 +131,11 @@ def build_args(spec: RunSpec, output_root: Path) -> Namespace:
         ising_epochs = 0
         dropout = 0.0
         p_bayes = spec.p_bayes
+    elif spec.method == "sparse_vd":
+        ising_type = "no_saliency_scores"
+        ising_epochs = 0
+        dropout = 0.0
+        p_bayes = 0.0
     else:
         raise ValueError(f"Unsupported method: {spec.method}")
 
@@ -139,6 +148,8 @@ def build_args(spec: RunSpec, output_root: Path) -> Namespace:
         f"_logstd{spec.posterior_log_std:g}"
         f"_dropout{spec.dropout:g}"
         f"_pbayes{spec.p_bayes:g}"
+        f"_svdthreshold{spec.sparse_vd_threshold:g}"
+        f"_svdlogsig{spec.sparse_vd_log_sigma_init:g}"
     ).replace("-", "m").replace(".", "p")
     ckpt = output_root / "checkpoints" / spec.study / spec.dataset / spec.method / run_tag
 
@@ -149,6 +160,7 @@ def build_args(spec: RunSpec, output_root: Path) -> Namespace:
         use_multi_gpu=False,
         device_ids=[0],
         num_models=1,
+        method=spec.method,
         dropout=dropout,
         dropconnect_delta=spec.dropconnect_delta,
         p_bayes=p_bayes,
@@ -179,6 +191,9 @@ def build_args(spec: RunSpec, output_root: Path) -> Namespace:
         lradj="type2",
         mc_samples=spec.mc_samples,
         hessian_block_size=256,
+        sparse_vd_threshold=spec.sparse_vd_threshold,
+        sparse_vd_log_sigma_init=spec.sparse_vd_log_sigma_init,
+        sparse_vd_kl_warmup_epochs=spec.sparse_vd_kl_warmup_epochs,
     )
     base.update(MODEL_CFG[spec.dataset])
     return Namespace(**base)
@@ -277,6 +292,22 @@ def build_study(study: str) -> list[RunSpec]:
                     dropconnect_delta=delta,
                     posterior_log_std=log_std,
                 ))
+
+    elif study == "sparse_vd":
+        # Minimal stronger Bayesian baseline: the two reviewer-table settings
+        # with three matched seeds and the same 15-epoch training allocation.
+        for dataset, n_train in (("mnist", 6_000), ("cifar100", 15_000)):
+            for seed in range(3):
+                specs.append(RunSpec(
+                    study,
+                    dataset,
+                    n_train,
+                    seed,
+                    method="sparse_vd",
+                    pilot_epochs=15,
+                    ising_epochs=0,
+                    sparse_vd_kl_warmup_epochs=15,
+                ))
     else:
         raise ValueError(f"Unknown study: {study}")
 
@@ -342,7 +373,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--study",
         required=True,
-        choices=("cifar100_variance", "efficiency", "warmstart", "sensitivity"),
+        choices=("cifar100_variance", "efficiency", "warmstart", "sensitivity", "sparse_vd"),
     )
     parser.add_argument("--output-root", default="reviewer_results")
     parser.add_argument(

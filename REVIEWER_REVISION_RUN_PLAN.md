@@ -95,6 +95,10 @@ Preferred addition: Sparse Variational Dropout (Molchanov et al., 2017), applied
 ViT geometry. It is a better experimental fit than Movement Pruning because the present ViTs are
 trained from scratch rather than pruned during pretrained-model fine-tuning.
 
+Implementation status: implemented as `SparseVDLinear` using the paper-author PyTorch reference
+formulation. Training uses local reparameterization, the published approximate KL term, a linear KL
+warm-up over the fixed 15-epoch reviewer budget, and deterministic pruning at `log(alpha) > 3`.
+
 Minimum comparison after implementation:
 - MNIST n=6,000, 3 seeds;
 - CIFAR-100 n=15,000, 3 seeds;
@@ -102,6 +106,9 @@ Minimum comparison after implementation:
 - report accuracy, ECE/Brier, sparsity, runtime, and peak GPU memory.
 
 Total: 6 additional runs for one stronger baseline.
+
+Launch only these six runs with `scripts/arc/submit_sparse_vd.sh`; do not resubmit the completed
+80-run reviewer matrix.
 
 ## No additional run strictly required
 

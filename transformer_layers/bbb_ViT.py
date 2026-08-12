@@ -9,8 +9,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
+def _make_linear(linear_layer_cls, in_features, out_features, linear_layer_kwargs):
+    """Construct one projection while keeping the ViT independent of layer type."""
+    return linear_layer_cls(in_features, out_features, **linear_layer_kwargs)
+
 class MultiHeadAttention(nn.Module):
-    def __init__(self, dim, heads, dropout=0.0, p_bayes = 0.0, dropconnect_delta = 0.5, posterior_log_std=-4.0):
+    def __init__(self, dim, heads, dropout=0.0, p_bayes = 0.0, dropconnect_delta = 0.5, posterior_log_std=-4.0, linear_layer_cls=BBBLinear, linear_layer_kwargs=None):
         super(MultiHeadAttention, self).__init__()
         
         self.dim = dim
@@ -20,13 +25,16 @@ class MultiHeadAttention(nn.Module):
         # Ensure that the dimension is divisible by the number of heads
         assert self.head_dim * heads == dim, "Embedding dimension must be divisible by number of heads"
         
-        # Linear layers for queries, keys, and values (using BBBLinear)
-        self.query = BBBLinear(dim, dim, p=p_bayes, posterior_log_std=posterior_log_std)
-        self.key = BBBLinear(dim, dim, p=p_bayes, posterior_log_std=posterior_log_std)
-        self.value = BBBLinear(dim, dim, p=p_bayes, posterior_log_std=posterior_log_std)
+        if linear_layer_kwargs is None:
+            linear_layer_kwargs = {"p": p_bayes, "posterior_log_std": posterior_log_std}
+
+        # Linear layers for queries, keys, and values.
+        self.query = _make_linear(linear_layer_cls, dim, dim, linear_layer_kwargs)
+        self.key = _make_linear(linear_layer_cls, dim, dim, linear_layer_kwargs)
+        self.value = _make_linear(linear_layer_cls, dim, dim, linear_layer_kwargs)
         
-        # Output linear layer (using BBBLinear)
-        self.out_projection = BBBLinear(dim, dim, p=p_bayes, posterior_log_std=posterior_log_std)
+        # Output linear layer.
+        self.out_projection = _make_linear(linear_layer_cls, dim, dim, linear_layer_kwargs)
         
         # Dropout layer
         self.dropout = nn.Dropout(dropout)
@@ -64,20 +72,32 @@ class MultiHeadAttention(nn.Module):
         return out
 
 class TransformerEncoderLayerWithBBB(nn.Module):
-    def __init__(self, embed_dim, num_heads, mlp_ratio=16.0, dropout=0.0, p_bayes = 0.0, dropconnect_delta = 0.5, posterior_log_std=-4.0, device=torch.device("cuda" if torch.cuda.is_available() else "cpu")):
+    def __init__(self, embed_dim, num_heads, mlp_ratio=16.0, dropout=0.0, p_bayes = 0.0, dropconnect_delta = 0.5, posterior_log_std=-4.0, device=torch.device("cuda" if torch.cuda.is_available() else "cpu"), linear_layer_cls=BBBLinear, linear_layer_kwargs=None):
         super(TransformerEncoderLayerWithBBB, self).__init__()
+
+        if linear_layer_kwargs is None:
+            linear_layer_kwargs = {"p": p_bayes, "posterior_log_std": posterior_log_std}
 
         self.norm1 = nn.LayerNorm(embed_dim)
         
-        self.self_attn = MultiHeadAttention(embed_dim, num_heads, dropout=dropout, p_bayes=p_bayes, dropconnect_delta=dropconnect_delta, posterior_log_std=posterior_log_std)
+        self.self_attn = MultiHeadAttention(
+            embed_dim,
+            num_heads,
+            dropout=dropout,
+            p_bayes=p_bayes,
+            dropconnect_delta=dropconnect_delta,
+            posterior_log_std=posterior_log_std,
+            linear_layer_cls=linear_layer_cls,
+            linear_layer_kwargs=linear_layer_kwargs,
+        )
 
         self.norm2 = nn.LayerNorm(embed_dim)
         
         self.mlp = nn.Sequential(
-            BBBLinear(embed_dim, int(embed_dim * mlp_ratio), p=p_bayes, posterior_log_std=posterior_log_std),
+            _make_linear(linear_layer_cls, embed_dim, int(embed_dim * mlp_ratio), linear_layer_kwargs),
             nn.GELU(),
             nn.Dropout(dropout),
-            BBBLinear(int(embed_dim * mlp_ratio), embed_dim, p=p_bayes, posterior_log_std=posterior_log_std),
+            _make_linear(linear_layer_cls, int(embed_dim * mlp_ratio), embed_dim, linear_layer_kwargs),
             nn.Dropout(dropout),
         )
 
@@ -108,7 +128,9 @@ class VisionTransformerWithBBB(nn.Module):
         dropconnect_delta=0.5,
         posterior_log_std=-4.0,
         device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-        epoch_tracker=None
+        epoch_tracker=None,
+        linear_layer_cls=BBBLinear,
+        linear_layer_kwargs=None,
     ):
         super(VisionTransformerWithBBB, self).__init__()
 
@@ -120,14 +142,31 @@ class VisionTransformerWithBBB(nn.Module):
         self.device = device
         self.epoch_tracker = epoch_tracker
 
+        if linear_layer_kwargs is None:
+            linear_layer_kwargs = {"p": p_bayes, "posterior_log_std": posterior_log_std}
+
         # Patch Embedding Layer
-        self.patch_embedding = BBBLinear(3 * patch_size * patch_size, embed_dim, p=p_bayes, posterior_log_std=posterior_log_std)
+        self.patch_embedding = _make_linear(
+            linear_layer_cls,
+            3 * patch_size * patch_size,
+            embed_dim,
+            linear_layer_kwargs,
+        )
 
         # Transformer Encoder
         self.encoder = nn.ModuleList(
             [
                 TransformerEncoderLayerWithBBB(
-                    embed_dim, num_heads, mlp_ratio, dropout, p_bayes, dropconnect_delta, posterior_log_std=posterior_log_std, device=device
+                    embed_dim,
+                    num_heads,
+                    mlp_ratio,
+                    dropout,
+                    p_bayes,
+                    dropconnect_delta,
+                    posterior_log_std=posterior_log_std,
+                    device=device,
+                    linear_layer_cls=linear_layer_cls,
+                    linear_layer_kwargs=linear_layer_kwargs,
                 )
                 for _ in range(depth)
             ]
@@ -135,10 +174,10 @@ class VisionTransformerWithBBB(nn.Module):
 
         # Classification Head
         self.classification_head = nn.Sequential(
-            BBBLinear(embed_dim, embed_dim // 2, p=p_bayes, posterior_log_std=posterior_log_std),
+            _make_linear(linear_layer_cls, embed_dim, embed_dim // 2, linear_layer_kwargs),
             nn.ReLU(),
             nn.Dropout(dropout),
-            BBBLinear(embed_dim // 2, num_classes, p=p_bayes, posterior_log_std=posterior_log_std),
+            _make_linear(linear_layer_cls, embed_dim // 2, num_classes, linear_layer_kwargs),
         )
 
     def forward(self, x):
@@ -162,4 +201,3 @@ class VisionTransformerWithBBB(nn.Module):
         # Forward through classification head
         logits = self.classification_head(cls_token)
         return logits
-

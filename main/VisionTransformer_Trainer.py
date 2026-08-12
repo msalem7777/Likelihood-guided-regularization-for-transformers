@@ -22,6 +22,7 @@ from scipy.stats import mode, entropy
 from torch.utils.data import DataLoader
 from transformer_layers.bbb_ViT import VisionTransformerWithBBB
 from transformer_layers.bbb_linear import BBBLinear
+from transformer_layers.sparse_vd_linear import SparseVDLinear
 from data_loader.dataloader_master import To3Channels, get_vit_dataloaders
 from utils.early_stopping import EarlyStopping
 from utils.learning_rate import adjust_learning_rate
@@ -199,6 +200,9 @@ class VisionTransformerTrainer:
             "num_parameters": None,
             "ising_expected_dropped":  None,
             "ising_dropped":  None,
+            "sparse_vd_dropped": None,
+            "sparse_vd_sparsity": None,
+            "sparse_vd_final_kl_weight": None,
             "total_potential":  None,
             "pilot_sec": None,
             "ising_sec": None,
@@ -229,6 +233,21 @@ class VisionTransformerTrainer:
         # Build multiple ViT models if specified in args
         models = []
         initial_dropout = 0.0 if self.args.ising_epochs > 0 else self.args.dropout
+        is_sparse_vd = getattr(self.args, 'method', None) == 'sparse_vd'
+
+        if is_sparse_vd:
+            linear_layer_cls = SparseVDLinear
+            linear_layer_kwargs = {
+                'threshold': getattr(self.args, 'sparse_vd_threshold', 3.0),
+                'log_sigma_init': getattr(self.args, 'sparse_vd_log_sigma_init', -5.0),
+            }
+        else:
+            linear_layer_cls = BBBLinear
+            linear_layer_kwargs = {
+                'p': getattr(self.args, 'p_bayes', 0.0),
+                'posterior_log_std': getattr(self.args, 'posterior_log_std', -4.0),
+            }
+
         for _ in range(self.args.num_models):
             model = VisionTransformerWithBBB(
                 img_size=self.args.img_size,
@@ -243,6 +262,8 @@ class VisionTransformerTrainer:
                 posterior_log_std=getattr(self.args, 'posterior_log_std', -4.0),
                 device=self.device,
                 epoch_tracker=self,  # Pass the instance for epoch tracking
+                linear_layer_cls=linear_layer_cls,
+                linear_layer_kwargs=linear_layer_kwargs,
             ).float()
     
             if self.args.use_multi_gpu and self.args.use_gpu:
@@ -366,7 +387,21 @@ class VisionTransformerTrainer:
 
     def _select_optimizer(self):
         # Create a list of optimizers for each model
-        model_optim = [optim.Adam(model.parameters(), lr=self.args.learning_rate, weight_decay = self.args.kl_pen) for model in self.models]
+        # Sparse VD already supplies its Bayesian KL regularizer. Applying the
+        # repo's ordinary L2 weight decay as well would change that baseline.
+        weight_decay = (
+            0.0
+            if getattr(self.args, 'method', None) == 'sparse_vd'
+            else self.args.kl_pen
+        )
+        model_optim = [
+            optim.Adam(
+                model.parameters(),
+                lr=self.args.learning_rate,
+                weight_decay=weight_decay,
+            )
+            for model in self.models
+        ]
 
         return model_optim
 
@@ -383,7 +418,7 @@ class VisionTransformerTrainer:
                 for j in range(i + 1, len(self.models)):
                     param_pairs.append((named[i], named[j]))
 
-        def criterion(predictions, targets):
+        def criterion(predictions, targets, model=None):
             # Make sure targets are of type float for BCEWithLogitsLoss
             targets = targets.long()
             task_loss = task_criterion(predictions, targets)
@@ -423,6 +458,19 @@ class VisionTransformerTrainer:
             lambda_weight1 = self.args.lambda_weight1
             lambda_weight2 = self.args.lambda_weight2
             total_loss = task_loss - lambda_weight1 * similarity_penalty + lambda_weight2 * orthogonal_penalty
+
+            # The reference Sparse VD objective is N * CE + KL. Dividing the
+            # whole expression by N gives the numerically equivalent minibatch
+            # objective CE + KL/N used here. Validation calls omit ``model`` so
+            # early stopping remains based on predictive cross-entropy only.
+            if model is not None and getattr(self.args, 'method', None) == 'sparse_vd':
+                kl = sum(
+                    module.kl_divergence()
+                    for module in model.modules()
+                    if isinstance(module, SparseVDLinear)
+                )
+                kl_weight = getattr(self, '_sparse_vd_kl_weight', 1.0)
+                total_loss = total_loss + kl_weight * kl / self.train_len
             
             return total_loss
 
@@ -596,8 +644,8 @@ class VisionTransformerTrainer:
 
     def predict_mc_posterior_weight_sampling_quantiles(self, n_mc=50, n_quantiles=10, inverse=False, chunk_size=512):
         """
-        For each MC pass, sample weights and Bernoulli masks for every BBBLinear layer,
-        run prediction for all test samples (in chunks), and collect MC posterior stats.
+        For each MC pass, sample each Bayesian layer's weights, run prediction
+        for all test samples in chunks, and collect posterior statistics.
         """
         args = self.args
         data_set, data_loader = self._get_data(flag='test')
@@ -632,34 +680,48 @@ class VisionTransformerTrainer:
             mc_pred_labels = np.zeros((n_samples, n_mc), dtype=int)
             mc_probs = np.zeros((n_samples, n_mc, num_classes), dtype=float)
 
-            # Identify BBB layers once; patch forwards once, restore once at the end
-            bbb_layers = [
+            # Identify stochastic layers once; patch forwards once, then restore once.
+            stochastic_layers = [
                 layer for _, layer in model.named_modules()
-                if hasattr(layer, "mean_weight") and hasattr(layer, "log_std_weight")
+                if isinstance(layer, (BBBLinear, SparseVDLinear))
             ]
-            orig_forwards = [layer.forward for layer in bbb_layers]
-            # Precompute per-layer std and keep-probability (constant across MC passes)
-            layer_stds = [torch.exp(layer.log_std_weight.detach()) for layer in bbb_layers]
+            orig_forwards = [layer.forward for layer in stochastic_layers]
+
+            # BBBLinear uses a posterior sample plus a Bernoulli keep mask.
+            # SparseVDLinear uses its learned Gaussian posterior and the
+            # canonical deterministic log(alpha) pruning rule.
+            layer_stds = []
             layer_keep_probs = []
-            for layer in bbb_layers:
-                if hasattr(layer, "avg_dropout_mask"):
-                    keep_prob = 1 - layer.avg_dropout_mask.to(layer.mean_weight.device)
+            for layer in stochastic_layers:
+                if isinstance(layer, SparseVDLinear):
+                    layer_stds.append(torch.exp(layer.log_sigma_weight.detach()))
+                    keep_prob = layer.retained_weight_mask().to(layer.mean_weight.dtype)
                 else:
-                    keep_prob = torch.full_like(layer.mean_weight, 1 - getattr(self.args, 'p_bayes', 0.0))
+                    layer_stds.append(torch.exp(layer.log_std_weight.detach()))
+                    if hasattr(layer, "avg_dropout_mask"):
+                        keep_prob = 1 - layer.avg_dropout_mask.to(layer.mean_weight.device)
+                    else:
+                        keep_prob = torch.full_like(
+                            layer.mean_weight,
+                            1 - getattr(self.args, 'p_bayes', 0.0),
+                        )
                 layer_keep_probs.append(keep_prob)
 
             try:
-                for layer in bbb_layers:
+                for layer in stochastic_layers:
                     layer._mc_bias = layer.mean_bias
                     layer.forward = mc_forward.__get__(layer, type(layer))
 
                 with torch.no_grad():
                     for mc in range(n_mc):
-                        # Resample weights and masks for every BBB layer
-                        for layer, std_w, keep_prob in zip(bbb_layers, layer_stds, layer_keep_probs):
+                        # Resample weights and any Bernoulli masks for every layer.
+                        for layer, std_w, keep_prob in zip(stochastic_layers, layer_stds, layer_keep_probs):
                             sampled_weight = layer.mean_weight + std_w * torch.randn_like(layer.mean_weight)
-                            sampled_mask = torch.bernoulli(keep_prob)
-                            layer._mc_weight = sampled_weight * sampled_mask
+                            if isinstance(layer, SparseVDLinear):
+                                layer._mc_weight = sampled_weight * keep_prob
+                            else:
+                                sampled_mask = torch.bernoulli(keep_prob)
+                                layer._mc_weight = sampled_weight * sampled_mask
 
                         # Forward in chunks (per-sample ops only -> identical to one big batch)
                         row = 0
@@ -676,7 +738,7 @@ class VisionTransformerTrainer:
                             row += nb
             finally:
                 # Restore original forwards and drop MC attributes
-                for layer, orig in zip(bbb_layers, orig_forwards):
+                for layer, orig in zip(stochastic_layers, orig_forwards):
                     layer.forward = orig
                     if hasattr(layer, "_mc_weight"):
                         delattr(layer, "_mc_weight")
@@ -829,6 +891,14 @@ class VisionTransformerTrainer:
             else:
                 phase = 'fine-tuning'
             self.set_current_phase(phase)
+
+            if getattr(self.args, 'method', None) == 'sparse_vd':
+                warmup_epochs = max(
+                    1,
+                    int(getattr(self.args, 'sparse_vd_kl_warmup_epochs', 15)),
+                )
+                self._sparse_vd_kl_weight = min((epoch + 1) / warmup_epochs, 1.0)
+                print(f"Sparse VD KL weight: {self._sparse_vd_kl_weight:.6f}")
 
             if self.args.ising_epochs > 0 and phase == 'fine-tuning' and not self._ising_masks_finalized:
                 self._finalize_ising_masks()
@@ -1046,7 +1116,7 @@ class VisionTransformerTrainer:
                     pred = model(batch_x)  
     
                     # Compute loss for each model
-                    loss = criterion(pred, batch_y)
+                    loss = criterion(pred, batch_y, model=model)
                     train_loss[model_idx].append(loss.detach())
 
                     if ((epoch == (self.args.train_epochs-1)) and (i == (train_steps-1))) or ((self.current_epoch == 'ising') and (i == (train_steps-1))):
@@ -1182,11 +1252,30 @@ class VisionTransformerTrainer:
         self._run_stats["num_parameters"] = total_params
         self._run_stats["ising_expected_dropped"]  = getattr(self, "ising_expec_params", 0)
         self._run_stats["ising_dropped"]  = getattr(self, "ising_params", 0)
-        self._run_stats["total_potential"]  = getattr(self, "total_maskable", 0)
+
+        sparse_vd_dropped = 0
+        sparse_vd_total = 0
+        for module in self.models[0].modules():
+            if isinstance(module, SparseVDLinear):
+                pruned, total = module.sparsity_stats()
+                sparse_vd_dropped += pruned
+                sparse_vd_total += total
+
+        self._run_stats["sparse_vd_dropped"] = sparse_vd_dropped
+        self._run_stats["sparse_vd_sparsity"] = (
+            sparse_vd_dropped / sparse_vd_total if sparse_vd_total else 0.0
+        )
+        self._run_stats["sparse_vd_final_kl_weight"] = getattr(
+            self, "_sparse_vd_kl_weight", 0.0
+        )
+        self._run_stats["total_potential"] = (
+            sparse_vd_total
+            if sparse_vd_total
+            else getattr(self, "total_maskable", 0)
+        )
         self._run_stats["pilot_sec"] = phase_seconds["pilot"]
         self._run_stats["ising_sec"] = phase_seconds["ising"]
         self._run_stats["fine_tuning_sec"] = phase_seconds["fine-tuning"]
         self._run_stats["exact_hessian_sec"] = exact_hessian_seconds
 
         return self.models
-
