@@ -146,8 +146,9 @@ def build_args(spec: RunSpec, output_root: Path) -> Namespace:
     val_split = train_samples_to_val_split(spec.dataset, spec.train_samples)
     is_sparse_vd = spec.method == "sparse_vd"
     batch_size = 100 if is_sparse_vd else 20
+    is_mnist_family = spec.dataset in ("mnist", "fashionmnist")
     learning_rate = (
-        (1e-3 if spec.dataset == "mnist" else 1e-5)
+        (1e-3 if is_mnist_family else 1e-5)
         if is_sparse_vd
         else 1e-3
     )
@@ -313,7 +314,13 @@ def build_study(study: str) -> list[RunSpec]:
     elif study == "sparse_vd":
         # Stronger Bayesian baseline using the method-specific 200-epoch
         # optimization policy from the attached paper-author repository.
-        for dataset, n_train in (("mnist", 6_000), ("cifar100", 15_000)):
+        dataset_settings = (
+            ("mnist", 6_000, True, "author_mnist_linear_to_zero"),
+            ("fashionmnist", 6_000, True, "author_mnist_linear_to_zero"),
+            ("cifar10", 15_000, False, "author_cifar_linear_after_100"),
+            ("cifar100", 15_000, False, "author_cifar_linear_after_100"),
+        )
+        for dataset, n_train, train_clip, lr_schedule in dataset_settings:
             for seed in range(3):
                 specs.append(RunSpec(
                     study,
@@ -324,14 +331,10 @@ def build_study(study: str) -> list[RunSpec]:
                     pilot_epochs=200,
                     ising_epochs=0,
                     sparse_vd_log_alpha_clip=8.0,
-                    sparse_vd_train_clip=(dataset == "mnist"),
+                    sparse_vd_train_clip=train_clip,
                     sparse_vd_kl_delay_epochs=5,
                     sparse_vd_kl_warmup_epochs=15,
-                    sparse_vd_lr_schedule=(
-                        "author_mnist_linear_to_zero"
-                        if dataset == "mnist"
-                        else "author_cifar_linear_after_100"
-                    ),
+                    sparse_vd_lr_schedule=lr_schedule,
                 ))
     else:
         raise ValueError(f"Unknown study: {study}")

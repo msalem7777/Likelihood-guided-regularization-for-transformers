@@ -108,15 +108,17 @@ decays linearly to zero; CIFAR starts at 1e-5 and begins its linear decay after 
 geometry and reviewer data subsets remain fixed, so this is an architecture/data-matched baseline
 with method-appropriate optimization rather than an identical-short-budget comparison.
 
-Minimum comparison after implementation:
+Minimum comparison after implementation, covering every benchmark dataset in the paper:
 - MNIST n=6,000, 3 seeds;
+- Fashion-MNIST n=6,000, 3 seeds;
+- CIFAR-10 n=15,000, 3 seeds;
 - CIFAR-100 n=15,000, 3 seeds;
 - same optimizer/training budget where the method permits;
 - report accuracy, ECE/Brier, sparsity, runtime, and peak GPU memory.
 
-Total: 6 additional runs for one stronger baseline.
+Total: 12 additional runs for one stronger baseline.
 
-Launch only these six runs with `scripts/arc/submit_sparse_vd.sh`; do not resubmit the completed
+Launch only these twelve runs with `scripts/arc/submit_sparse_vd.sh`; do not resubmit the completed
 80-run reviewer matrix.
 
 ## No additional run strictly required

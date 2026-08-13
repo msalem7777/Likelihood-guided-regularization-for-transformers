@@ -6,7 +6,7 @@ Run from the repository root:
 
 The test intentionally avoids downloading datasets or starting a real training
 job. It checks the new mathematical layer, its gradients, deterministic pruning,
-ViT integration, and the exact six-run reviewer matrix.
+ViT integration, and the exact twelve-run all-dataset reviewer matrix.
 """
 
 from __future__ import annotations
@@ -143,19 +143,33 @@ def smoke_vit_integration() -> None:
 
 
 def smoke_reviewer_matrix() -> None:
-    """Check the six prespecified jobs and their trainer-facing arguments."""
+    """Check the twelve all-dataset jobs and their trainer-facing arguments."""
     specs = build_study("sparse_vd")
-    assert len(specs) == 6
+    assert len(specs) == 12
     assert [(spec.dataset, spec.seed) for spec in specs] == [
         ("mnist", 0),
         ("mnist", 1),
         ("mnist", 2),
+        ("fashionmnist", 0),
+        ("fashionmnist", 1),
+        ("fashionmnist", 2),
+        ("cifar10", 0),
+        ("cifar10", 1),
+        ("cifar10", 2),
         ("cifar100", 0),
         ("cifar100", 1),
         ("cifar100", 2),
     ]
 
+    expected_train_samples = {
+        "mnist": 6_000,
+        "fashionmnist": 6_000,
+        "cifar10": 15_000,
+        "cifar100": 15_000,
+    }
+
     for spec in specs:
+        assert spec.train_samples == expected_train_samples[spec.dataset]
         args = build_args(spec, Path("reviewer_results"))
         assert args.method == "sparse_vd"
         assert args.train_epochs == 200
@@ -166,7 +180,7 @@ def smoke_reviewer_matrix() -> None:
         assert args.sparse_vd_log_alpha_clip == 8.0
         assert args.sparse_vd_kl_delay_epochs == 5
         assert args.sparse_vd_kl_warmup_epochs == 15
-        if spec.dataset == "mnist":
+        if spec.dataset in ("mnist", "fashionmnist"):
             assert args.learning_rate == 1e-3
             assert args.sparse_vd_train_clip is True
             assert args.sparse_vd_lr_schedule == "author_mnist_linear_to_zero"
