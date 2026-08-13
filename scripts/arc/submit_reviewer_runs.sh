@@ -25,8 +25,11 @@ submit_study() {
 # 20 runs
 submit_study cifar100_variance 19
 
-# 27 runs
-submit_study efficiency 26
+# 51 runs
+submit_study efficiency 50
+
+# 240 runs
+submit_study efficiency_missing_datasets 239
 
 # 15 runs
 submit_study warmstart 14
@@ -34,6 +37,7 @@ submit_study warmstart 14
 # 18 runs
 submit_study sensitivity 17
 
-echo "Submitted 80 implemented reviewer runs."
-echo "The 6 Sparse Variational Dropout baseline runs are intentionally not submitted yet;"
-echo "that baseline still needs to be implemented and smoke-tested."
+# 36 runs
+submit_study sparse_vd 35
+
+echo "Submitted 380 paper-faithful reviewer runs."
