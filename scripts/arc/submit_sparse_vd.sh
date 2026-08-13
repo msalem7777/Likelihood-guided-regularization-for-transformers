@@ -6,6 +6,7 @@ set -euo pipefail
 REPO_DIR="${REPO_DIR:-$(pwd)}"
 REVIEWER_VENV="${REVIEWER_VENV:-}"
 MAX_PARALLEL="${MAX_PARALLEL:-4}"
+TIME_LIMIT="${TIME_LIMIT:-04:00:00}"
 
 if [[ ! -f "${REPO_DIR}/examples/reviewer_experiments.py" ]]; then
     echo "ERROR: REPO_DIR does not point to the repository root: ${REPO_DIR}" >&2
@@ -18,6 +19,7 @@ mkdir -p "${REPO_DIR}/slurm_logs" "${REPO_DIR}/reviewer_results"
 python "${REPO_DIR}/examples/reviewer_experiments.py" --study sparse_vd --dry-run
 
 sbatch \
+    --time="${TIME_LIMIT}" \
     --array="0-5%${MAX_PARALLEL}" \
     --export="ALL,STUDY=sparse_vd,REPO_DIR=${REPO_DIR},REVIEWER_VENV=${REVIEWER_VENV}" \
     "${REPO_DIR}/scripts/arc/reviewer_array.sbatch"

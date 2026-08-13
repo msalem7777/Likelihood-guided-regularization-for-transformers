@@ -27,6 +27,11 @@ from data_loader.dataloader_master import To3Channels, get_vit_dataloaders
 from utils.early_stopping import EarlyStopping
 from utils.learning_rate import adjust_learning_rate
 from utils.metrics import metric, MAE, MSE, RMSE, MAPE, MSPE, LGLOSS, ACCRCY, multiclass_calibration_metrics
+from utils.sparse_vd import (
+    set_optimizer_learning_rate,
+    sparse_vd_kl_weight,
+    sparse_vd_learning_rate,
+)
 
 # Full float32 matmul precision: disable TF32 so results are bit-comparable
 # across GPU generations and with CPU reference computations.
@@ -240,6 +245,8 @@ class VisionTransformerTrainer:
             linear_layer_kwargs = {
                 'threshold': getattr(self.args, 'sparse_vd_threshold', 3.0),
                 'log_sigma_init': getattr(self.args, 'sparse_vd_log_sigma_init', -5.0),
+                'log_alpha_clip': getattr(self.args, 'sparse_vd_log_alpha_clip', 8.0),
+                'train_clip': getattr(self.args, 'sparse_vd_train_clip', False),
             }
         else:
             linear_layer_cls = BBBLinear
@@ -694,7 +701,9 @@ class VisionTransformerTrainer:
             layer_keep_probs = []
             for layer in stochastic_layers:
                 if isinstance(layer, SparseVDLinear):
-                    layer_stds.append(torch.exp(layer.log_sigma_weight.detach()))
+                    layer_stds.append(
+                        torch.sqrt(layer.posterior_variance_weight().detach() + 1e-16)
+                    )
                     keep_prob = layer.retained_weight_mask().to(layer.mean_weight.dtype)
                 else:
                     layer_stds.append(torch.exp(layer.log_std_weight.detach()))
@@ -893,12 +902,29 @@ class VisionTransformerTrainer:
             self.set_current_phase(phase)
 
             if getattr(self.args, 'method', None) == 'sparse_vd':
-                warmup_epochs = max(
-                    1,
-                    int(getattr(self.args, 'sparse_vd_kl_warmup_epochs', 15)),
+                self._sparse_vd_kl_weight = sparse_vd_kl_weight(
+                    epoch=epoch,
+                    delay_epochs=int(
+                        getattr(self.args, 'sparse_vd_kl_delay_epochs', 5)
+                    ),
+                    ramp_epochs=int(
+                        getattr(self.args, 'sparse_vd_kl_warmup_epochs', 15)
+                    ),
                 )
-                self._sparse_vd_kl_weight = min((epoch + 1) / warmup_epochs, 1.0)
+                sparse_vd_lr = sparse_vd_learning_rate(
+                    epoch=epoch,
+                    initial_lr=float(self.args.learning_rate),
+                    schedule=getattr(
+                        self.args,
+                        'sparse_vd_lr_schedule',
+                        'author_mnist_linear_to_zero',
+                    ),
+                    total_epochs=int(self.args.train_epochs),
+                )
+                for optimizer in model_optim:
+                    set_optimizer_learning_rate(optimizer, sparse_vd_lr)
                 print(f"Sparse VD KL weight: {self._sparse_vd_kl_weight:.6f}")
+                print(f"Sparse VD learning rate: {sparse_vd_lr:.8f}")
 
             if self.args.ising_epochs > 0 and phase == 'fine-tuning' and not self._ising_masks_finalized:
                 self._finalize_ising_masks()
@@ -1204,8 +1230,9 @@ class VisionTransformerTrainer:
                 break
 
             # Adjust learning rates for each optimizer
-            for optimizer in model_optim:
-                adjust_learning_rate(optimizer, epoch + 1, self.args)
+            if getattr(self.args, 'method', None) != 'sparse_vd':
+                for optimizer in model_optim:
+                    adjust_learning_rate(optimizer, epoch + 1, self.args)
 
         if self.args.ising_epochs > 0 and not self._ising_masks_finalized:
             self._finalize_ising_masks()

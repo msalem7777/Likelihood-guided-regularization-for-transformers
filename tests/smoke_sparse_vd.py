@@ -12,6 +12,7 @@ ViT integration, and the exact six-run reviewer matrix.
 from __future__ import annotations
 
 import sys
+import math
 from pathlib import Path
 
 import torch
@@ -24,6 +25,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from examples.reviewer_experiments import build_args, build_study
 from transformer_layers.bbb_ViT import VisionTransformerWithBBB
 from transformer_layers.sparse_vd_linear import SparseVDLinear
+from utils.sparse_vd import sparse_vd_kl_weight, sparse_vd_learning_rate
 
 
 def assert_finite_gradient(parameter: torch.nn.Parameter, name: str) -> None:
@@ -49,8 +51,45 @@ def smoke_layer_forward_backward() -> None:
     assert prediction.shape == (5, 3)
     assert torch.isfinite(prediction).all()
     assert torch.isfinite(kl)
+    assert kl.item() >= 0.0
     assert_finite_gradient(layer.mean_weight, "mean_weight")
     assert_finite_gradient(layer.log_sigma_weight, "log_sigma_weight")
+
+
+def smoke_author_equations() -> None:
+    """Check the dense-layer equations against the uploaded author source."""
+    layer = SparseVDLinear(
+        2,
+        1,
+        bias=False,
+        threshold=3.0,
+        log_alpha_clip=8.0,
+        train_clip=True,
+    )
+    with torch.no_grad():
+        layer.mean_weight.copy_(torch.tensor([[1e-8, 1.0]]))
+        layer.log_sigma_weight.copy_(torch.tensor([[4.0, -10.0]]))
+
+    expected_log_alpha = torch.tensor([[8.0, -8.0]])
+    expected_variance = torch.exp(expected_log_alpha) * layer.mean_weight.square()
+    expected_training_mean = torch.tensor([[0.0, 1.0]])
+
+    assert torch.allclose(layer.log_alpha(), expected_log_alpha)
+    assert torch.allclose(layer.posterior_variance_weight(), expected_variance)
+    assert torch.equal(layer.training_mean_weight(), expected_training_mean)
+
+    k1, k2, k3 = 0.63576, 1.87320, 1.48695
+    reference_negative_kl = (
+        k1 * torch.sigmoid(k2 + k3 * expected_log_alpha)
+        - 0.5 * F.softplus(-expected_log_alpha)
+        - k1
+    )
+    assert torch.allclose(
+        layer.kl_divergence(),
+        -reference_negative_kl.sum(),
+        rtol=1e-6,
+        atol=1e-7,
+    )
 
 
 def smoke_deterministic_pruning() -> None:
@@ -82,7 +121,12 @@ def smoke_vit_integration() -> None:
         num_heads=2,
         mlp_ratio=2.0,
         linear_layer_cls=SparseVDLinear,
-        linear_layer_kwargs={"threshold": 3.0, "log_sigma_init": -5.0},
+        linear_layer_kwargs={
+            "threshold": 3.0,
+            "log_sigma_init": -5.0,
+            "log_alpha_clip": 8.0,
+            "train_clip": False,
+        },
     )
     sparse_layers = [module for module in model.modules() if isinstance(module, SparseVDLinear)]
     assert len(sparse_layers) == 9, f"expected 9 SparseVDLinear layers, found {len(sparse_layers)}"
@@ -114,18 +158,60 @@ def smoke_reviewer_matrix() -> None:
     for spec in specs:
         args = build_args(spec, Path("reviewer_results"))
         assert args.method == "sparse_vd"
-        assert args.train_epochs == 15
+        assert args.train_epochs == 200
         assert args.ising_epochs == 0
+        assert args.batch_size == 100
         assert args.sparse_vd_threshold == 3.0
         assert args.sparse_vd_log_sigma_init == -5.0
+        assert args.sparse_vd_log_alpha_clip == 8.0
+        assert args.sparse_vd_kl_delay_epochs == 5
         assert args.sparse_vd_kl_warmup_epochs == 15
+        if spec.dataset == "mnist":
+            assert args.learning_rate == 1e-3
+            assert args.sparse_vd_train_clip is True
+            assert args.sparse_vd_lr_schedule == "author_mnist_linear_to_zero"
+        else:
+            assert args.learning_rate == 1e-5
+            assert args.sparse_vd_train_clip is False
+            assert args.sparse_vd_lr_schedule == "author_cifar_linear_after_100"
+
+
+def smoke_author_schedules() -> None:
+    """Check exact zero-based epoch boundaries from ``nets/optpolicy.py``."""
+    expected_kl = {
+        0: 0.0,
+        4: 0.0,
+        5: 0.0,
+        6: 1.0 / 15.0,
+        19: 14.0 / 15.0,
+        20: 1.0,
+        199: 1.0,
+    }
+    for epoch, expected in expected_kl.items():
+        assert math.isclose(sparse_vd_kl_weight(epoch), expected, abs_tol=1e-12)
+
+    mnist_expected = {0: 1e-3, 100: 5e-4, 199: 5e-6}
+    for epoch, expected in mnist_expected.items():
+        actual = sparse_vd_learning_rate(
+            epoch, 1e-3, "author_mnist_linear_to_zero"
+        )
+        assert math.isclose(actual, expected, rel_tol=1e-12)
+
+    cifar_expected = {0: 1e-5, 100: 1e-5, 150: 5e-6, 199: 1e-7}
+    for epoch, expected in cifar_expected.items():
+        actual = sparse_vd_learning_rate(
+            epoch, 1e-5, "author_cifar_linear_after_100"
+        )
+        assert math.isclose(actual, expected, rel_tol=1e-12)
 
 
 def main() -> None:
     smoke_layer_forward_backward()
+    smoke_author_equations()
     smoke_deterministic_pruning()
     smoke_vit_integration()
     smoke_reviewer_matrix()
+    smoke_author_schedules()
     print("SPARSE VD SMOKE TESTS PASSED")
 
 

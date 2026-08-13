@@ -76,7 +76,11 @@ class RunSpec:
     calibration_bins: int = 15
     sparse_vd_threshold: float = 3.0
     sparse_vd_log_sigma_init: float = -5.0
+    sparse_vd_log_alpha_clip: float = 8.0
+    sparse_vd_train_clip: bool = False
+    sparse_vd_kl_delay_epochs: int = 5
     sparse_vd_kl_warmup_epochs: int = 15
+    sparse_vd_lr_schedule: str = "author_mnist_linear_to_zero"
 
 
 def train_samples_to_val_split(dataset: str, train_samples: int, test_split: float = 0.10) -> float:
@@ -140,6 +144,13 @@ def build_args(spec: RunSpec, output_root: Path) -> Namespace:
         raise ValueError(f"Unsupported method: {spec.method}")
 
     val_split = train_samples_to_val_split(spec.dataset, spec.train_samples)
+    is_sparse_vd = spec.method == "sparse_vd"
+    batch_size = 100 if is_sparse_vd else 20
+    learning_rate = (
+        (1e-3 if spec.dataset == "mnist" else 1e-5)
+        if is_sparse_vd
+        else 1e-3
+    )
     run_tag = (
         f"seed{spec.seed}"
         f"_pilot{spec.pilot_epochs}"
@@ -150,6 +161,8 @@ def build_args(spec: RunSpec, output_root: Path) -> Namespace:
         f"_pbayes{spec.p_bayes:g}"
         f"_svdthreshold{spec.sparse_vd_threshold:g}"
         f"_svdlogsig{spec.sparse_vd_log_sigma_init:g}"
+        f"_svdclip{spec.sparse_vd_log_alpha_clip:g}"
+        f"_svdtrainclip{int(spec.sparse_vd_train_clip)}"
     ).replace("-", "m").replace(".", "p")
     ckpt = output_root / "checkpoints" / spec.study / spec.dataset / spec.method / run_tag
 
@@ -165,8 +178,8 @@ def build_args(spec: RunSpec, output_root: Path) -> Namespace:
         dropconnect_delta=spec.dropconnect_delta,
         p_bayes=p_bayes,
         posterior_log_std=spec.posterior_log_std,
-        batch_size=20,
-        learning_rate=1e-3,
+        batch_size=batch_size,
+        learning_rate=learning_rate,
         kl_pen=1e-6,
         patience=100,
         lambda_weight1=1e-6,
@@ -193,7 +206,11 @@ def build_args(spec: RunSpec, output_root: Path) -> Namespace:
         hessian_block_size=256,
         sparse_vd_threshold=spec.sparse_vd_threshold,
         sparse_vd_log_sigma_init=spec.sparse_vd_log_sigma_init,
+        sparse_vd_log_alpha_clip=spec.sparse_vd_log_alpha_clip,
+        sparse_vd_train_clip=spec.sparse_vd_train_clip,
+        sparse_vd_kl_delay_epochs=spec.sparse_vd_kl_delay_epochs,
         sparse_vd_kl_warmup_epochs=spec.sparse_vd_kl_warmup_epochs,
+        sparse_vd_lr_schedule=spec.sparse_vd_lr_schedule,
     )
     base.update(MODEL_CFG[spec.dataset])
     return Namespace(**base)
@@ -294,8 +311,8 @@ def build_study(study: str) -> list[RunSpec]:
                 ))
 
     elif study == "sparse_vd":
-        # Minimal stronger Bayesian baseline: the two reviewer-table settings
-        # with three matched seeds and the same 15-epoch training allocation.
+        # Stronger Bayesian baseline using the method-specific 200-epoch
+        # optimization policy from the attached paper-author repository.
         for dataset, n_train in (("mnist", 6_000), ("cifar100", 15_000)):
             for seed in range(3):
                 specs.append(RunSpec(
@@ -304,9 +321,17 @@ def build_study(study: str) -> list[RunSpec]:
                     n_train,
                     seed,
                     method="sparse_vd",
-                    pilot_epochs=15,
+                    pilot_epochs=200,
                     ising_epochs=0,
+                    sparse_vd_log_alpha_clip=8.0,
+                    sparse_vd_train_clip=(dataset == "mnist"),
+                    sparse_vd_kl_delay_epochs=5,
                     sparse_vd_kl_warmup_epochs=15,
+                    sparse_vd_lr_schedule=(
+                        "author_mnist_linear_to_zero"
+                        if dataset == "mnist"
+                        else "author_cifar_linear_after_100"
+                    ),
                 ))
     else:
         raise ValueError(f"Unknown study: {study}")
