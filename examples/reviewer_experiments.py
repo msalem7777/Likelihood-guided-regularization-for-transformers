@@ -44,10 +44,10 @@ from main.VisionTransformer_Trainer import VisionTransformerTrainer
 
 
 MODEL_CFG = {
-    "mnist": dict(img_size=28, patch_size=7, num_classes=10, embed_dim=32, num_heads=4, depth=2),
-    "fashionmnist": dict(img_size=28, patch_size=7, num_classes=10, embed_dim=32, num_heads=4, depth=2),
-    "cifar10": dict(img_size=32, patch_size=4, num_classes=10, embed_dim=64, num_heads=8, depth=2),
-    "cifar100": dict(img_size=32, patch_size=4, num_classes=100, embed_dim=64, num_heads=8, depth=2),
+    "mnist": dict(img_size=28, patch_size=7, num_classes=10, embed_dim=64, num_heads=8, depth=2),
+    "fashionmnist": dict(img_size=28, patch_size=7, num_classes=10, embed_dim=64, num_heads=8, depth=2),
+    "cifar10": dict(img_size=32, patch_size=4, num_classes=10, embed_dim=128, num_heads=16, depth=2),
+    "cifar100": dict(img_size=32, patch_size=4, num_classes=100, embed_dim=128, num_heads=16, depth=2),
 }
 
 DATASET_TOTALS = {
@@ -65,8 +65,8 @@ class RunSpec:
     train_samples: int
     seed: int
     method: str = "ising_lm"
-    pilot_epochs: int = 5
-    ising_epochs: int = 10
+    pilot_epochs: int = 1
+    ising_epochs: int = 70
     fine_tune_epochs: int = 0
     dropconnect_delta: float = 0.5
     posterior_log_std: float = -4.0
@@ -113,34 +113,46 @@ def build_args(spec: RunSpec, output_root: Path) -> Namespace:
     """Translate one reviewer RunSpec into the trainer's existing Namespace API."""
     if spec.method == "ising_lm":
         ising_type = "LM_saliency_scores"
+        train_epochs = spec.pilot_epochs
         ising_epochs = spec.ising_epochs
         dropout = 0.0
         p_bayes = 0.0
+        disable_early_stopping = True
     elif spec.method == "ising_diag":
         ising_type = "diag_saliency_scores"
+        train_epochs = spec.pilot_epochs
         ising_epochs = spec.ising_epochs
         dropout = 0.0
         p_bayes = 0.0
+        disable_early_stopping = True
     elif spec.method == "ising_no_saliency":
         ising_type = "no_saliency_scores"
+        train_epochs = spec.pilot_epochs
         ising_epochs = spec.ising_epochs
         dropout = 0.0
         p_bayes = 0.0
+        disable_early_stopping = True
     elif spec.method == "dropout":
         ising_type = "no_saliency_scores"
+        train_epochs = 71
         ising_epochs = 0
         dropout = spec.dropout
         p_bayes = 0.0
+        disable_early_stopping = False
     elif spec.method == "dropconnect":
         ising_type = "no_saliency_scores"
+        train_epochs = 71
         ising_epochs = 0
         dropout = 0.0
         p_bayes = spec.p_bayes
+        disable_early_stopping = True
     elif spec.method == "sparse_vd":
         ising_type = "no_saliency_scores"
+        train_epochs = spec.pilot_epochs
         ising_epochs = 0
         dropout = 0.0
         p_bayes = 0.0
+        disable_early_stopping = True
     else:
         raise ValueError(f"Unsupported method: {spec.method}")
 
@@ -186,11 +198,11 @@ def build_args(spec: RunSpec, output_root: Path) -> Namespace:
         patience=100,
         lambda_weight1=1e-6,
         lambda_weight2=1e-6,
-        train_epochs=spec.pilot_epochs,
+        train_epochs=train_epochs,
         ising_epochs=ising_epochs,
         addtl_ft=spec.fine_tune_epochs,
         ising_type=ising_type,
-        disable_early_stopping=True,
+        disable_early_stopping=disable_early_stopping,
         drop_thresh=0.5,
         val_split=val_split,
         test_split=0.10,
@@ -203,7 +215,7 @@ def build_args(spec: RunSpec, output_root: Path) -> Namespace:
         path=".",
         sim_seed=spec.seed,
         split_seed=spec.seed,
-        lradj="type2",
+        lradj="type2" if is_sparse_vd else "type4",
         mc_samples=spec.mc_samples,
         hessian_block_size=256,
         sparse_vd_threshold=spec.sparse_vd_threshold,
@@ -271,40 +283,128 @@ def build_study(study: str) -> list[RunSpec]:
                 specs.append(RunSpec(study, "cifar100", 15_000, seed, dropconnect_delta=delta))
 
     elif study == "efficiency":
-        # One easy and one hard setting; matched seeds. Exact diagonal Hessian is restricted
-        # to MNIST because its purpose here is cost quantification, not a full accuracy sweep.
+        # Paper-faithful computational-efficiency comparison on one moderate
+        # and one difficult condition. Both paper hyperparameter settings are
+        # included for every directly comparable method.
+        #
+        # The no-saliency variant is an internal ablation used to isolate the
+        # computational overhead of LM/Hessian saliency. Exact diagonal Hessian
+        # remains MNIST-only because its purpose is cost quantification.
         for seed in range(3):
             for dataset, n_train in (("mnist", 6_000), ("cifar100", 15_000)):
-                specs.extend([
-                    RunSpec(study, dataset, n_train, seed, method="ising_lm"),
-                    RunSpec(study, dataset, n_train, seed, method="ising_no_saliency"),
-                    RunSpec(study, dataset, n_train, seed, method="dropout", dropout=0.1),
-                    RunSpec(study, dataset, n_train, seed, method="dropconnect", p_bayes=0.1),
-                ])
-            specs.append(RunSpec(study, "mnist", 6_000, seed, method="ising_diag"))
+                for hp in (0.1, 0.5):
+                    specs.extend([
+                        RunSpec(
+                            study, dataset, n_train, seed,
+                            method="ising_lm",
+                            dropconnect_delta=hp,
+                        ),
+                        RunSpec(
+                            study, dataset, n_train, seed,
+                            method="ising_no_saliency",
+                            dropconnect_delta=hp,
+                        ),
+                        RunSpec(
+                            study, dataset, n_train, seed,
+                            method="dropout",
+                            dropout=hp,
+                        ),
+                        RunSpec(
+                            study, dataset, n_train, seed,
+                            method="dropconnect",
+                            p_bayes=hp,
+                        ),
+                    ])
+
+            specs.append(RunSpec(
+                study,
+                "mnist",
+                6_000,
+                seed,
+                method="ising_diag",
+                dropconnect_delta=0.5,
+            ))
 
     elif study == "efficiency_missing_datasets":
-        # Complete the paper-wide runtime, memory, accuracy, and calibration
-        # comparison without repeating the already completed MNIST/CIFAR-100
-        # efficiency jobs. Exact diagonal Hessian remains MNIST-only by design.
-        for dataset, n_train in (("fashionmnist", 6_000), ("cifar10", 15_000)):
+        # Extend the same paper-faithful computational-efficiency comparison
+        # to every remaining dataset-size condition appearing in the paper.
+        #
+        # The main paper grid contains:
+        #   MNIST / Fashion-MNIST : 300, 6,000, 18,000
+        #   CIFAR-10 / CIFAR-100  : 250, 5,000, 15,000
+        #
+        # efficiency already covers MNIST n=6,000 and CIFAR-100 n=15,000.
+        # This study covers the ten remaining conditions.
+        #
+        # Both paper hyperparameter settings (0.1 and 0.5) are included for:
+        #   1. Ising with LM saliency
+        #   2. Ising without saliency
+        #   3. Dropout
+        #   4. DropConnect
+        #
+        # Three matched seeds are used for runtime, memory, predictive
+        # performance, sparsity where applicable, and calibration summaries.
+        missing_paper_settings = (
+            ("mnist", 300),
+            ("mnist", 18_000),
+            ("fashionmnist", 300),
+            ("fashionmnist", 6_000),
+            ("fashionmnist", 18_000),
+            ("cifar10", 250),
+            ("cifar10", 5_000),
+            ("cifar10", 15_000),
+            ("cifar100", 250),
+            ("cifar100", 5_000),
+        )
+
+        for dataset, n_train in missing_paper_settings:
             for seed in range(3):
-                specs.extend([
-                    RunSpec(study, dataset, n_train, seed, method="ising_lm"),
-                    RunSpec(study, dataset, n_train, seed, method="ising_no_saliency"),
-                    RunSpec(study, dataset, n_train, seed, method="dropout", dropout=0.1),
-                    RunSpec(study, dataset, n_train, seed, method="dropconnect", p_bayes=0.1),
-                ])
+                for hp in (0.1, 0.5):
+                    specs.extend([
+                        RunSpec(
+                            study,
+                            dataset,
+                            n_train,
+                            seed,
+                            method="ising_lm",
+                            dropconnect_delta=hp,
+                        ),
+                        RunSpec(
+                            study,
+                            dataset,
+                            n_train,
+                            seed,
+                            method="ising_no_saliency",
+                            dropconnect_delta=hp,
+                        ),
+                        RunSpec(
+                            study,
+                            dataset,
+                            n_train,
+                            seed,
+                            method="dropout",
+                            dropout=hp,
+                        ),
+                        RunSpec(
+                            study,
+                            dataset,
+                            n_train,
+                            seed,
+                            method="dropconnect",
+                            p_bayes=hp,
+                        ),
+                    ])
 
     elif study == "warmstart":
-        # Hold total pilot+Ising epochs at 15 so the stopping-point comparison does not
-        # simply reward longer total training.
+        # The paper protocol uses 71 total epochs: 1 pilot epoch followed by
+        # 70 likelihood-guided Ising epochs. Vary the warm-start duration while
+        # holding the total 71-epoch training budget fixed.
         for seed in range(5):
             for pilot_epochs in (1, 5, 10):
                 specs.append(RunSpec(
                     study, "cifar100", 15_000, seed,
                     pilot_epochs=pilot_epochs,
-                    ising_epochs=15 - pilot_epochs,
+                    ising_epochs=71 - pilot_epochs,
                 ))
 
     elif study == "sensitivity":
@@ -327,13 +427,41 @@ def build_study(study: str) -> list[RunSpec]:
 
     elif study == "sparse_vd":
         # Stronger Bayesian baseline using the method-specific 200-epoch
-        # optimization policy from the attached paper-author repository.
-        dataset_settings = (
+        # optimization policy from the Sparse Variational Dropout implementation.
+        #
+        # IMPORTANT:
+        # The first 12 entries deliberately preserve the ordering of the original
+        # sparse_vd matrix. This keeps any already-completed run_000 ... run_011
+        # results valid after expanding the study.
+        #
+        # Paper training-size grid:
+        #   MNIST / Fashion-MNIST : 300, 6,000, 18,000
+        #   CIFAR-10 / CIFAR-100  : 250, 5,000, 15,000
+        #
+        # Sparse VD does not have the paper's delta=0.1/0.5 hyperparameter.
+        # Therefore each Sparse VD dataset/size/seed run serves as one baseline
+        # against both corresponding paper tables rather than being duplicated
+        # artificially for delta.
+        original_settings = (
             ("mnist", 6_000, True, "author_mnist_linear_to_zero"),
             ("fashionmnist", 6_000, True, "author_mnist_linear_to_zero"),
             ("cifar10", 15_000, False, "author_cifar_linear_after_100"),
             ("cifar100", 15_000, False, "author_cifar_linear_after_100"),
         )
+
+        missing_paper_settings = (
+            ("mnist", 300, True, "author_mnist_linear_to_zero"),
+            ("mnist", 18_000, True, "author_mnist_linear_to_zero"),
+            ("fashionmnist", 300, True, "author_mnist_linear_to_zero"),
+            ("fashionmnist", 18_000, True, "author_mnist_linear_to_zero"),
+            ("cifar10", 250, False, "author_cifar_linear_after_100"),
+            ("cifar10", 5_000, False, "author_cifar_linear_after_100"),
+            ("cifar100", 250, False, "author_cifar_linear_after_100"),
+            ("cifar100", 5_000, False, "author_cifar_linear_after_100"),
+        )
+
+        dataset_settings = original_settings + missing_paper_settings
+
         for dataset, n_train, train_clip, lr_schedule in dataset_settings:
             for seed in range(3):
                 specs.append(RunSpec(
