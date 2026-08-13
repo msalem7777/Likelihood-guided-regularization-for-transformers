@@ -9,6 +9,7 @@ Examples
 --------
 python examples/reviewer_experiments.py --study cifar100_variance
 python examples/reviewer_experiments.py --study efficiency
+python examples/reviewer_experiments.py --study efficiency_missing_datasets
 python examples/reviewer_experiments.py --study warmstart
 python examples/reviewer_experiments.py --study sensitivity
 python examples/reviewer_experiments.py --study sparse_vd
@@ -282,6 +283,19 @@ def build_study(study: str) -> list[RunSpec]:
                 ])
             specs.append(RunSpec(study, "mnist", 6_000, seed, method="ising_diag"))
 
+    elif study == "efficiency_missing_datasets":
+        # Complete the paper-wide runtime, memory, accuracy, and calibration
+        # comparison without repeating the already completed MNIST/CIFAR-100
+        # efficiency jobs. Exact diagonal Hessian remains MNIST-only by design.
+        for dataset, n_train in (("fashionmnist", 6_000), ("cifar10", 15_000)):
+            for seed in range(3):
+                specs.extend([
+                    RunSpec(study, dataset, n_train, seed, method="ising_lm"),
+                    RunSpec(study, dataset, n_train, seed, method="ising_no_saliency"),
+                    RunSpec(study, dataset, n_train, seed, method="dropout", dropout=0.1),
+                    RunSpec(study, dataset, n_train, seed, method="dropconnect", p_bayes=0.1),
+                ])
+
     elif study == "warmstart":
         # Hold total pilot+Ising epochs at 15 so the stopping-point comparison does not
         # simply reward longer total training.
@@ -401,7 +415,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--study",
         required=True,
-        choices=("cifar100_variance", "efficiency", "warmstart", "sensitivity", "sparse_vd"),
+        choices=(
+            "cifar100_variance",
+            "efficiency",
+            "efficiency_missing_datasets",
+            "warmstart",
+            "sensitivity",
+            "sparse_vd",
+        ),
     )
     parser.add_argument("--output-root", default="reviewer_results")
     parser.add_argument(

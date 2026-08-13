@@ -35,7 +35,7 @@ explain the variance.
 Reviewer issue: claims of minimal overhead, GPU memory usage, runtime, inference cost, and Hessian cost
 are not quantitatively supported.
 
-Run seed-matched comparisons on MNIST n=6,000 and CIFAR-100 n=15,000 for:
+The completed core study used seed-matched comparisons on MNIST n=6,000 and CIFAR-100 n=15,000 for:
 - Ising LM
 - Ising without saliency
 - fixed dropout
@@ -43,6 +43,15 @@ Run seed-matched comparisons on MNIST n=6,000 and CIFAR-100 n=15,000 for:
 
 Use three seeds. Additionally run exact diagonal Hessian Ising on MNIST n=6,000 for three seeds.
 Total: 27 runs.
+
+To cover every benchmark dataset in the paper, run the same four primary methods on the two datasets
+not included in the completed core efficiency matrix:
+- Fashion-MNIST n=6,000, three seeds;
+- CIFAR-10 n=15,000, three seeds.
+
+This adds 2 datasets x 4 methods x 3 seeds = 24 runs. The exact-diagonal-Hessian arm remains restricted
+to MNIST because it isolates estimator cost and is not intended as a paper-wide accuracy baseline.
+Launch this extension as `efficiency_missing_datasets`; do not rerun the completed 27 efficiency jobs.
 
 Report:
 - total training wall time;
