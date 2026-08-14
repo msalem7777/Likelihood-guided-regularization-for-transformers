@@ -1,6 +1,6 @@
 # Reviewer revision experiment plan
 
-This file maps the unresolved experimental reviewer comments to a minimal, controlled run plan.
+This file maps the unresolved experimental reviewer comments to the complete 380-run controlled plan.
 It deliberately separates experiments that are required for the revision from experiments that can
 be answered by clarification or by explicitly framing a point as future work.
 
@@ -35,23 +35,20 @@ explain the variance.
 Reviewer issue: claims of minimal overhead, GPU memory usage, runtime, inference cost, and Hessian cost
 are not quantitatively supported.
 
-The completed core study used seed-matched comparisons on MNIST n=6,000 and CIFAR-100 n=15,000 for:
+The core study uses seed-matched comparisons on MNIST n=6,000 and CIFAR-100 n=15,000 for both paper hyperparameter settings, 0.1 and 0.5, for:
 - Ising LM
 - Ising without saliency
 - fixed dropout
 - fixed DropConnect
 
 Use three seeds. Additionally run exact diagonal Hessian Ising on MNIST n=6,000 for three seeds.
-Total: 27 runs.
+Total: 51 runs.
 
-To cover every benchmark dataset in the paper, run the same four primary methods on the two datasets
-not included in the completed core efficiency matrix:
-- Fashion-MNIST n=6,000, three seeds;
-- CIFAR-10 n=15,000, three seeds.
-
-This adds 2 datasets x 4 methods x 3 seeds = 24 runs. The exact-diagonal-Hessian arm remains restricted
-to MNIST because it isolates estimator cost and is not intended as a paper-wide accuracy baseline.
-Launch this extension as `efficiency_missing_datasets`; do not rerun the completed 27 efficiency jobs.
+To cover every paper dataset-size condition, run both hyperparameter settings for the same four primary
+methods on the ten conditions not covered by the core study. This adds
+10 conditions x 2 settings x 4 methods x 3 seeds = 240 runs. The exact-diagonal-Hessian arm remains
+restricted to MNIST because it isolates estimator cost and is not intended as a paper-wide accuracy
+baseline. Launch this extension as `efficiency_missing_datasets`.
 
 Report:
 - total training wall time;
@@ -70,10 +67,10 @@ replace the primary estimator throughout the full benchmark.
 
 Reviewer issue: sensitivity to the pilot/warm-start stopping point.
 
-Use CIFAR-100 n=15,000, Ising LM, five matched seeds. Hold pilot+Ising budget at 15 epochs:
-- pilot 1 / Ising 14
-- pilot 5 / Ising 10
-- pilot 10 / Ising 5
+Use CIFAR-100 n=15,000, Ising LM, five matched seeds. Hold pilot+Ising budget at the paper's 71 epochs:
+- pilot 1 / Ising 70
+- pilot 5 / Ising 66
+- pilot 10 / Ising 61
 
 Total: 15 runs.
 
@@ -117,18 +114,17 @@ decays linearly to zero; CIFAR starts at 1e-5 and begins its linear decay after 
 geometry and reviewer data subsets remain fixed, so this is an architecture/data-matched baseline
 with method-appropriate optimization rather than an identical-short-budget comparison.
 
-Minimum comparison after implementation, covering every benchmark dataset in the paper:
-- MNIST n=6,000, 3 seeds;
-- Fashion-MNIST n=6,000, 3 seeds;
-- CIFAR-10 n=15,000, 3 seeds;
-- CIFAR-100 n=15,000, 3 seeds;
+Comparison covering all twelve benchmark dataset-size conditions in the paper:
+- MNIST and Fashion-MNIST at n=300, 6,000, and 18,000;
+- CIFAR-10 and CIFAR-100 at n=250, 5,000, and 15,000;
+- three seeds per condition;
 - same optimizer/training budget where the method permits;
 - report accuracy, ECE/Brier, sparsity, runtime, and peak GPU memory.
 
-Total: 12 additional runs for one stronger baseline.
+Total: 36 runs for one stronger baseline.
 
-Launch only these twelve runs with `scripts/arc/submit_sparse_vd.sh`; do not resubmit the completed
-80-run reviewer matrix.
+Launch only these 36 runs with `scripts/arc/submit_sparse_vd.sh` when the other studies have already
+been submitted.
 
 ## No additional run strictly required
 

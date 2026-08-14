@@ -15,7 +15,7 @@ REPO_DIR="${REPO_DIR:?REPO_DIR must point to the repository root}"
 REVIEWER_VENV="${REVIEWER_VENV:?REVIEWER_VENV must point to the Python virtual environment}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-${REPO_DIR}/reviewer_results}"
 PACK_SIZE=4
-LAST_RUN_INDEX=23
+LAST_RUN_INDEX=239
 
 cd "${REPO_DIR}"
 source "${REVIEWER_VENV}/bin/activate"

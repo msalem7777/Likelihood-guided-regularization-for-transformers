@@ -88,35 +88,83 @@ class BBBLinear(nn.Module):
         self.custom_mask_prob = mask.to(self.mean_weight.device)
         
     def forward(self, input: torch.Tensor) -> torch.Tensor:
+        device = self.mean_weight.device
         current_epoch = self.epoch_tracker.current_epoch if self.epoch_tracker else 'pilot'
 
+        # ``_get_stds`` is the reviewer-ready cached equivalent of the paper's
+        # torch.exp(log_std) calls. It recomputes the values whenever the
+        # standard deviations are trainable.
+        std_weight, std_bias = self._get_stds()
+
         if self.training:
-            std_weight, std_bias = self._get_stds()
-            sampled_weights = std_weight * torch.randn_like(self.mean_weight)
-            noisy_mean = self.mean_weight + std_weight * torch.randn_like(self.mean_weight)
+            # Preserve the paper sampling order: draw the zero-centered slab,
+            # then the Bernoulli mask, then the noisy mean component.
+            sampled_weights = torch.normal(
+                mean=torch.zeros_like(self.mean_weight, device=device),
+                std=std_weight,
+            )
 
             if self.custom_mask_prob is not None:
                 p = self.custom_mask_prob
-                if self.debug_checks and not torch.all(torch.isfinite(p)):
+                # Preserve the paper implementation's unconditional safeguard.
+                # CUDA Bernoulli requires every probability to be finite and in
+                # [0, 1]; checking here gives the originating layer and mask.
+                if not torch.all(torch.isfinite(p)):
                     print(p)
                     raise RuntimeError("❌ custom_mask_prob contains NaNs or Infs")
+                if torch.any(p < 0) or torch.any(p > 1):
+                    print(p)
+                    raise RuntimeError(
+                        "❌ custom_mask_prob contains values outside [0, 1]"
+                    )
+
+                binary_mask = 1 - torch.bernoulli(p)
+                prob_mask = 1 - p
 
                 if current_epoch == "fine-tuning":
-                    prob_mask = 1 - p
-                    weight = noisy_mean * prob_mask + sampled_weights * (1 - prob_mask)
+                    weight = (
+                        self.mean_weight
+                        + std_weight * torch.randn_like(
+                            self.mean_weight,
+                            device=device,
+                        )
+                    ) * prob_mask + sampled_weights * (1 - prob_mask)
                 else:
-                    binary_mask = 1 - torch.bernoulli(p)
-                    weight = noisy_mean * binary_mask + sampled_weights * (1 - binary_mask)
+                    weight = (
+                        self.mean_weight
+                        + std_weight * torch.randn_like(
+                            self.mean_weight,
+                            device=device,
+                        )
+                    ) * binary_mask + sampled_weights * (1 - binary_mask)
             else:
+                binary_mask = 1 - torch.bernoulli(
+                    torch.full_like(self.mean_weight, self.p)
+                )
+                prob_mask = 1 - self.p
+
                 if current_epoch == "fine-tuning":
-                    prob_mask = 1 - self.p
-                    weight = noisy_mean * prob_mask + sampled_weights * (1 - prob_mask)
+                    weight = (
+                        self.mean_weight
+                        + std_weight * torch.randn_like(
+                            self.mean_weight,
+                            device=device,
+                        )
+                    ) * prob_mask + sampled_weights * (1 - prob_mask)
                 else:
-                    binary_mask = 1 - torch.bernoulli(torch.full_like(self.mean_weight, self.p))
-                    weight = noisy_mean * binary_mask + sampled_weights * (1 - binary_mask)
+                    weight = (
+                        self.mean_weight
+                        + std_weight * torch.randn_like(
+                            self.mean_weight,
+                            device=device,
+                        )
+                    ) * binary_mask + sampled_weights * (1 - binary_mask)
 
             if self.mean_bias is not None:
-                bias = self.mean_bias + std_bias * torch.randn_like(self.mean_bias)
+                bias = self.mean_bias + std_bias * torch.randn_like(
+                    self.mean_bias,
+                    device=device,
+                )
             else:
                 bias = None
         else:

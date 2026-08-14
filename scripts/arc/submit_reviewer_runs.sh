@@ -22,13 +22,13 @@ submit_study() {
         scripts/arc/reviewer_array.sbatch
 }
 
-# 20 runs
+# 20 runs: 10 seeds × 2 external-field settings.
 submit_study cifar100_variance 19
 
-# 51 runs
+# 51 runs: the complete two-condition efficiency comparison.
 submit_study efficiency 50
 
-# 240 runs
+# 240 runs: all ten remaining paper dataset/size conditions.
 submit_study efficiency_missing_datasets 239
 
 # 15 runs
@@ -37,7 +37,7 @@ submit_study warmstart 14
 # 18 runs
 submit_study sensitivity 17
 
-# 36 runs
+# 36 runs: all twelve paper dataset/size conditions × 3 seeds.
 submit_study sparse_vd 35
 
-echo "Submitted 380 paper-faithful reviewer runs."
+echo "Submitted the complete 380-run reviewer matrix."

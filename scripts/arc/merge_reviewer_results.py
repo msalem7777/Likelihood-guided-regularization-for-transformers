@@ -13,7 +13,14 @@ def main() -> None:
     parser.add_argument("--root", default="reviewer_results")
     parser.add_argument(
         "--study",
-        choices=("cifar100_variance", "efficiency", "warmstart", "sensitivity"),
+        choices=(
+            "cifar100_variance",
+            "efficiency",
+            "efficiency_missing_datasets",
+            "warmstart",
+            "sensitivity",
+            "sparse_vd",
+        ),
         required=True,
     )
     args = parser.parse_args()

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Submit only the twelve Sparse Variational Dropout reviewer runs. This separate
-# launcher prevents accidental resubmission of the earlier 80-run matrix.
+# Submit only the 36 Sparse Variational Dropout reviewer runs. This separate
+# launcher is useful when the other reviewer studies were already submitted.
 REPO_DIR="${REPO_DIR:-$(pwd)}"
 REVIEWER_VENV="${REVIEWER_VENV:-}"
 MAX_PARALLEL="${MAX_PARALLEL:-4}"
@@ -20,8 +20,8 @@ python "${REPO_DIR}/examples/reviewer_experiments.py" --study sparse_vd --dry-ru
 
 sbatch \
     --time="${TIME_LIMIT}" \
-    --array="0-11%${MAX_PARALLEL}" \
+    --array="0-35%${MAX_PARALLEL}" \
     --export="ALL,STUDY=sparse_vd,REPO_DIR=${REPO_DIR},REVIEWER_VENV=${REVIEWER_VENV}" \
     "${REPO_DIR}/scripts/arc/reviewer_array.sbatch"
 
-echo "Submitted 12 Sparse Variational Dropout reviewer runs."
+echo "Submitted 36 Sparse Variational Dropout reviewer runs."

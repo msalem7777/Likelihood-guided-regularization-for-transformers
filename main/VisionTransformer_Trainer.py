@@ -70,10 +70,12 @@ def fast_compute_weight_dropout(final_layer, activations, targets, dropconnect_d
         B, D = A.shape
         C = W.shape[0]
 
-        if debug_checks:
-            assert torch.all(torch.isfinite(W)), "NaNs/Infs in final_layer.mean_weight"
-            assert torch.all(torch.isfinite(A)), "NaNs/Infs in activations"
-            assert torch.all(targets >= 0) and torch.all(targets < C), "Invalid target values"
+        # Preserve the paper implementation's unconditional validity checks.
+        # These fail at the source of an invalid probability rather than
+        # allowing a later Bernoulli draw to fail with an opaque CUDA error.
+        assert torch.all(torch.isfinite(W)), "NaNs/Infs in final_layer.mean_weight"
+        assert torch.all(torch.isfinite(A)), "NaNs/Infs in activations"
+        assert torch.all(targets >= 0) and torch.all(targets < C), "Invalid target values"
 
         logits = A @ W.T                              # (B, C)
 
@@ -90,15 +92,32 @@ def fast_compute_weight_dropout(final_layer, activations, targets, dropconnect_d
 
         M = masks_keep_all.shape[1]
 
-        # Z[b,c,k] = A[b,k] * W[c,k]; binary masks => mask^2 = mask, so
-        # logits_keep[b,d,m,c] = sum_k Z[b,c,k] * masks_keep_all[d,m,k]
-        Z = A.unsqueeze(1) * W.unsqueeze(0)                              # (B, C, D)
-        Mk = masks_keep_all.reshape(D * M, D)                            # (D*M, D)
-        logits_keep = (Z.reshape(B * C, D) @ Mk.T).view(B, C, D, M).permute(0, 2, 3, 1)  # (B, D, M, C)
+        # The paper implementation labels both the candidate-coordinate axis
+        # and the final input axis as "d" in its einsum. Repeating that label
+        # selects coordinate d; it does not sum over all input coordinates.
+        #
+        # Therefore:
+        # logits_keep[b,d,m,c]
+        #     = A[b,d] * W[c,d] * masks_keep_all[d,m,d]^2
+        # logits_drop[b,d,m,c]
+        #     = A[b,d] * W[c,d] * masks_drop_all[d,m,d]^2
+        #
+        # Computing only these diagonal mask entries preserves the paper's
+        # behavior without constructing the large expanded tensors.
+        coordinate_products = (
+            A.unsqueeze(1) * W.unsqueeze(0)
+        ).permute(0, 2, 1).unsqueeze(2)                                  # (B, D, 1, C)
 
-        # drop mask = keep mask with coordinate d zeroed:
-        # logits_drop[b,d,m,c] = logits_keep[b,d,m,c] - Z[b,c,d]
-        logits_drop = logits_keep - Z.permute(0, 2, 1).unsqueeze(2)      # (B, D, M, C)
+        diagonal_indices = torch.arange(D, device=A.device)
+        keep_diagonal = masks_keep_all[
+            diagonal_indices, :, diagonal_indices
+        ]                                                               # (D, M)
+        drop_diagonal = masks_drop_all[
+            diagonal_indices, :, diagonal_indices
+        ]                                                               # (D, M)
+
+        logits_keep = coordinate_products * keep_diagonal.square().unsqueeze(0).unsqueeze(-1)
+        logits_drop = coordinate_products * drop_diagonal.square().unsqueeze(0).unsqueeze(-1)
 
         targets_flat = targets.view(B, 1, 1).expand(-1, D, M).reshape(-1)
 
@@ -119,7 +138,7 @@ def fast_compute_weight_dropout(final_layer, activations, targets, dropconnect_d
         # Final clamping and diagnostics
         dropout_prob = torch.clamp(dropout_prob, min=epsilon, max=1 - epsilon)
 
-        if debug_checks and not torch.all(torch.isfinite(dropout_prob)):
+        if not torch.all(torch.isfinite(dropout_prob)):
             nan_rows = ~torch.isfinite(dropout_prob).all(dim=1)
             print("🔥 NaNs in dropout_prob at class indices:", torch.where(nan_rows)[0])
             print("Dropout row sample:", dropout_prob[nan_rows])
@@ -176,8 +195,6 @@ class VisionTransformerTrainer:
         self.current_epoch = 'pilot'                                        # Initialize epoch tracker
         self._init_run_stats()          # Experiment results tracking
         self._dataloader_cache = {}     # batch_size -> dataloaders dict; built once, reused
-        self._lm_grad_cache = {}       # layer_name -> gradient from one completed forward/backward step
-        self._lm_input_cache = {}      # layer_name -> matching mean input activation from that same step
         
     def set_current_phase(self, phase):
         """
@@ -445,21 +462,25 @@ class VisionTransformerTrainer:
                             elif self.args.sim_loss_type == 'log':
                                 similarity_penalty += torch.log(torch.norm(param_i - param_j) + 1e-6)  # Log of the Euclidean distance
                             elif self.args.sim_loss_type == 'orth':
-                                # param_i_vector = param_i.view(-1).unsqueeze(1)  # or param_i.flatten()
-                                # param_j_vector = param_j.view(-1).unsqueeze(1)  # or param_j.flatten()
-                                # identity = torch.eye(param_i_vector.size(0), device=param_i_vector.device)
-                                # similarity_penalty += torch.norm(torch.mm(param_i_vector, param_j_vector.T) - identity, p=2) ** 2   # Log of the Euclidean distance
-                                
-                                # TODO(design pass needed): the original formulation built
-                                # torch.eye(numel) per pair per batch (O(numel^2) memory,
-                                # ~1GB+ for MLP layers) and compares a rank-1 outer product
-                                # to identity, which is never small. Algebraic identity for
-                                # the original quantity, if ever needed:
-                                # ||v w^T - I||_F^2 = ||v||^2 ||w||^2 - 2 v.w + numel
-                                raise NotImplementedError(
-                                    "sim_loss_type='orth' is disabled pending redesign; "
-                                    "see comment above."
-                                )                                
+                                # Exact low-memory form of the paper objective:
+                                #
+                                # ||v w^T - I||_F^2
+                                #   = ||v||^2 ||w||^2 - 2(v·w) + numel(v)
+                                #
+                                # This avoids constructing the numel-by-numel
+                                # outer product and identity matrix while retaining
+                                # the original penalty exactly.
+                                param_i_vector = param_i.reshape(-1)
+                                param_j_vector = param_j.reshape(-1)
+                                similarity_penalty += (
+                                    param_i_vector.square().sum()
+                                    * param_j_vector.square().sum()
+                                    - 2.0 * torch.dot(
+                                        param_i_vector,
+                                        param_j_vector,
+                                    )
+                                    + param_i_vector.numel()
+                                )
     
             # Total loss = task loss - lambda_weight1 * similarity_penalty + lambda_weight2 * orthogonal_penalty
             lambda_weight1 = self.args.lambda_weight1
@@ -926,9 +947,6 @@ class VisionTransformerTrainer:
                 print(f"Sparse VD KL weight: {self._sparse_vd_kl_weight:.6f}")
                 print(f"Sparse VD learning rate: {sparse_vd_lr:.8f}")
 
-            if self.args.ising_epochs > 0 and phase == 'fine-tuning' and not self._ising_masks_finalized:
-                self._finalize_ising_masks()
-
             if self.args.ising_epochs > 0 and phase == 'fine-tuning' and epoch == (self.args.train_epochs + self.args.ising_epochs):
                 for model in self.models:
                     core_model = model.module if isinstance(model, nn.DataParallel) else model
@@ -985,13 +1003,14 @@ class VisionTransformerTrainer:
                     if self.args.ising_type == "LM_saliency_scores":
                         saliency_scores = {}
                         deda = {}
-                        if final_layer_name not in self._lm_grad_cache:
-                            raise RuntimeError(
-                                'LM saliency cache is empty. A completed pilot optimization step is required '
-                                'before entering the Ising phase.'
-                            )
-                        grad = self._lm_grad_cache[final_layer_name]
-                        input_activations = self._lm_input_cache[final_layer_name]
+                        # Preserve the paper method: the gradient available on
+                        # the layer at this point comes from the preceding
+                        # completed optimization step, while the activation is
+                        # the activation captured by the current Ising forward.
+                        grad = final_layer.mean_weight.grad
+                        input_activations = self.layer_inputs[
+                            (self.models[0], final_layer_name)
+                        ].mean(dim=0)
                         deda[final_layer_name] = 2*(grad / (input_activations + epsilon))**2  
                         saliency_scores[final_layer_name] = deda[final_layer_name].clone().detach()
                     
@@ -1074,11 +1093,31 @@ class VisionTransformerTrainer:
                                 elif self.args.ising_type == "LM_saliency_scores":
                                     curr_param = next_layer.mean_weight
                                     prev_param = layer.mean_weight
-                                    if next_layer_name not in self._lm_grad_cache:
-                                        raise RuntimeError(f'No matched LM gradient/activation cache for {next_layer_name}')
-                                    input_activations = self._lm_input_cache[next_layer_name].to(curr_param.device)
-                                    cached_grad = self._lm_grad_cache[next_layer_name].to(curr_param.device)
-                                    deda[next_layer_name] = (cached_grad / (input_activations + 1e-8))**2
+                                    input_activations = self.layer_inputs[
+                                        (self.models[0], next_layer_name)
+                                    ]
+
+                                    # Collapse batch and sequence/patch dimensions
+                                    # exactly as in the paper implementation.
+                                    if input_activations.dim() == 3:
+                                        input_activations = input_activations.mean(
+                                            dim=(0, 1)
+                                        )
+                                    elif input_activations.dim() == 2:
+                                        input_activations = input_activations.mean(dim=0)
+                                    else:
+                                        raise ValueError(
+                                            "Unexpected input_activations shape: "
+                                            f"{input_activations.shape}"
+                                        )
+
+                                    input_activations = input_activations.to(
+                                        curr_param.device
+                                    )
+                                    deda[next_layer_name] = (
+                                        curr_param.grad
+                                        / (input_activations + 1e-8)
+                                    )**2
                                     # Propagate deda by weighting with the square of next layer's weights
                                     deda[next_layer_name] = torch.matmul(deda[next_layer_name].T, torch.matmul(prev_param.T ** 2, deda[layer_name])).T 
                                     saliency_score = 0.5 * deda[next_layer_name].clone().detach() * (curr_param ** 2)
@@ -1131,9 +1170,25 @@ class VisionTransformerTrainer:
                         if len(hist) > 100:                    # clamp length
                             hist.pop(0)            
                 
-                # Final mask summaries are frozen only after the Ising phase completes.
+                # Preserve the paper timing: average and apply the accumulated
+                # Ising masks only when the final overall training epoch begins.
+                if (
+                    epoch
+                    == (
+                        self.args.train_epochs
+                        + self.args.ising_epochs
+                        + self.args.addtl_ft
+                        - 1
+                    )
+                    and self.args.ising_epochs > 0
+                    and not self._ising_masks_finalized
+                ):
+                    self._finalize_ising_masks()
 
                 # Training logic (core loop)
+                for optimizer in model_optim:
+                    optimizer.zero_grad()
+
                 shuffled_indices = list(range(len(self.models)))
                 random.shuffle(shuffled_indices)
 
@@ -1160,35 +1215,13 @@ class VisionTransformerTrainer:
                                     # Store saliency scores
                                     saliency_scores[name] = (0.5 * diag_hessian * (param ** 2)).detach()
 
-                    # NOTE: with the cross-model similarity penalty (num_models > 1), each
-                    # backward writes grads into ALL models; correctness relies on
-                    # zero_grad(model_idx) running immediately before this model's
-                    # backward + step.
-                    model_optim[model_idx].zero_grad()
+                    # Preserve the paper update ordering. The cross-model
+                    # similarity term writes gradients to every model, so all
+                    # optimizers must be cleared before each model's backward.
+                    for optimizer in model_optim:
+                        optimizer.zero_grad()
 
                     loss.backward()  # Backpropagation
-
-                    # Cache matched gradient/activation pairs for the next LM mask update.
-                    # This avoids mixing a previous-step gradient with current-step activations
-                    # while preserving the no-extra-backward-pass implementation.
-                    if self.args.ising_type == "LM_saliency_scores":
-                        for layer_name, module in model.named_modules():
-                            if not isinstance(module, BBBLinear) or module.mean_weight.grad is None:
-                                continue
-                            hook_key = (model, layer_name)
-                            if hook_key not in self.layer_inputs:
-                                continue
-                            layer_input = self.layer_inputs[hook_key].detach()
-                            if layer_input.dim() == 3:
-                                input_mean = layer_input.mean(dim=(0, 1))
-                            elif layer_input.dim() == 2:
-                                input_mean = layer_input.mean(dim=0)
-                            else:
-                                raise ValueError(
-                                    f"Unexpected LM cache input shape for {layer_name}: {layer_input.shape}"
-                                )
-                            self._lm_grad_cache[layer_name] = module.mean_weight.grad.detach().clone()
-                            self._lm_input_cache[layer_name] = input_mean.detach().clone()
 
                     model_optim[model_idx].step()  # Update model
 
@@ -1203,16 +1236,6 @@ class VisionTransformerTrainer:
             epoch_elapsed = time.time() - epoch_time
             phase_seconds[phase] += epoch_elapsed
             print("Epoch: {} cost time: {}".format(epoch+1, epoch_elapsed))
-
-            # If there is no fine-tuning phase, freeze the averaged Ising posterior
-            # immediately after the final Ising epoch so the phase checkpoint includes it.
-            if (
-                phase == "ising"
-                and self.args.addtl_ft == 0
-                and epoch == self.args.train_epochs + self.args.ising_epochs - 1
-                and not self._ising_masks_finalized
-            ):
-                self._finalize_ising_masks()
 
             # Validation and early stopping          
             train_loss_avg = [torch.stack(losses).mean().item() for losses in train_loss]
@@ -1233,9 +1256,6 @@ class VisionTransformerTrainer:
             if getattr(self.args, 'method', None) != 'sparse_vd':
                 for optimizer in model_optim:
                     adjust_learning_rate(optimizer, epoch + 1, self.args)
-
-        if self.args.ising_epochs > 0 and not self._ising_masks_finalized:
-            self._finalize_ising_masks()
 
         # Save all M models separately
         for idx, model in enumerate(self.models):

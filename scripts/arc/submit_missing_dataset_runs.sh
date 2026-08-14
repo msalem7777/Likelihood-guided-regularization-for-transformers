@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Submit only the 24 Fashion-MNIST/CIFAR-10 reviewer-extension runs.
-# Six array tasks each execute four configurations sequentially on one GPU.
+# Submit the 240-run missing-dataset reviewer extension.
+# Sixty array tasks each execute four configurations sequentially on one GPU.
 REPO_DIR="${REPO_DIR:-$(pwd)}"
 REVIEWER_VENV="${REVIEWER_VENV:-${HOME}/.venvs/coldread}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-${REPO_DIR}/reviewer_results}"
@@ -25,10 +25,10 @@ python "${REPO_DIR}/examples/reviewer_experiments.py" \
 submission=$(sbatch --parsable \
     --partition="${PARTITION}" \
     --time="${TIME_LIMIT}" \
-    --array="0-5%${MAX_PARALLEL}" \
+    --array="0-59%${MAX_PARALLEL}" \
     --export="ALL,REPO_DIR=${REPO_DIR},REVIEWER_VENV=${REVIEWER_VENV},OUTPUT_ROOT=${OUTPUT_ROOT}" \
     "${REPO_DIR}/scripts/arc/reviewer_missing_datasets_packed4.sbatch")
 
 job_id="${submission%%;*}"
-echo "Submitted 24 missing-dataset runs as six packed tasks."
+echo "Submitted 240 missing-dataset runs as sixty packed tasks."
 echo "Job ID: ${job_id}"
