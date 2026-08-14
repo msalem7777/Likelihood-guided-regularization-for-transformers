@@ -45,7 +45,7 @@ def _paper_reference_fast_compute(
     masks_keep_all,
     masks_drop_all,
 ):
-    """Direct transcription of the paper commit's expanded-tensor method."""
+    """Expanded reference for the intended paired-mask Monte Carlo method."""
     with torch.no_grad():
         weights = final_layer.mean_weight
         batch_size, input_features = activations.shape
@@ -79,13 +79,17 @@ def _paper_reference_fast_compute(
         keep_masks = masks_keep_all.unsqueeze(0)
         drop_masks = masks_drop_all.unsqueeze(0)
 
+        # d identifies the coordinate being tested; k traverses every
+        # coordinate in the sampled mask vector. Using separate labels is
+        # essential: repeating d in the final axis would select only the
+        # diagonal and discard all sampled off-diagonal mask entries.
         logits_keep = torch.einsum(
-            'bdmd,cdmd->bdmc',
+            'bdmk,cdmk->bdmc',
             activations_expanded * keep_masks,
             weights_expanded * keep_masks,
         )
         logits_drop = torch.einsum(
-            'bdmd,cdmd->bdmc',
+            'bdmk,cdmk->bdmc',
             activations_expanded * drop_masks,
             weights_expanded * drop_masks,
         )
@@ -185,6 +189,82 @@ def smoke_fast_compute_equivalence():
 
     torch.testing.assert_close(actual, expected, rtol=1e-10, atol=1e-10)
 
+    # The keep/drop masks must use the same Monte Carlo configuration at
+    # every non-tested coordinate and differ only at the tested coordinate.
+    mask_difference = masks_keep_all - masks_drop_all
+    expected_difference = torch.zeros_like(mask_difference)
+    expected_difference[
+        diagonal_indices, :, diagonal_indices
+    ] = 1.0
+    torch.testing.assert_close(
+        mask_difference,
+        expected_difference,
+        rtol=0.0,
+        atol=0.0,
+    )
+
+    # Prove that sampled off-diagonal entries materially affect the result.
+    # Flip one non-tested coordinate in both members of a paired mask. The
+    # optimized calculation must still match the expanded reference, and the
+    # resulting probability must change.
+    altered_keep_masks = masks_keep_all.clone()
+    altered_drop_masks = masks_drop_all.clone()
+
+    candidate_coordinate = 0
+    monte_carlo_sample = 0
+    off_diagonal_coordinate = 1
+    flipped_value = (
+        1.0
+        - altered_keep_masks[
+            candidate_coordinate,
+            monte_carlo_sample,
+            off_diagonal_coordinate,
+        ]
+    )
+    altered_keep_masks[
+        candidate_coordinate,
+        monte_carlo_sample,
+        off_diagonal_coordinate,
+    ] = flipped_value
+    altered_drop_masks[
+        candidate_coordinate,
+        monte_carlo_sample,
+        off_diagonal_coordinate,
+    ] = flipped_value
+
+    altered_expected = _paper_reference_fast_compute(
+        final_layer,
+        activations,
+        targets,
+        dropconnect_delta,
+        epsilon,
+        altered_keep_masks,
+        altered_drop_masks,
+    )
+    altered_actual = fast_compute_weight_dropout(
+        final_layer=final_layer,
+        activations=activations,
+        targets=targets,
+        dropconnect_delta=dropconnect_delta,
+        epsilon=epsilon,
+        masks_keep_all=altered_keep_masks,
+        masks_drop_all=altered_drop_masks,
+        mc_samples=monte_carlo_samples,
+        debug_checks=True,
+    )
+
+    torch.testing.assert_close(
+        altered_actual,
+        altered_expected,
+        rtol=1e-10,
+        atol=1e-10,
+    )
+    assert not torch.allclose(
+        altered_expected,
+        expected,
+        rtol=0.0,
+        atol=0.0,
+    ), "Changing an off-diagonal mask entry must change the MC result."
 
 def smoke_exact_hessian_equivalence():
     """The blockwise Hessian diagonal must match the original scalar loop."""

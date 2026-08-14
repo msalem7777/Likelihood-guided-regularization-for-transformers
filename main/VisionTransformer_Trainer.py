@@ -92,39 +92,79 @@ def fast_compute_weight_dropout(final_layer, activations, targets, dropconnect_d
 
         M = masks_keep_all.shape[1]
 
-        # The paper implementation labels both the candidate-coordinate axis
-        # and the final input axis as "d" in its einsum. Repeating that label
-        # selects coordinate d; it does not sum over all input coordinates.
+        # For every tested coordinate d and Monte Carlo sample m, evaluate
+        # the complete masked logit:
         #
-        # Therefore:
         # logits_keep[b,d,m,c]
-        #     = A[b,d] * W[c,d] * masks_keep_all[d,m,d]^2
-        # logits_drop[b,d,m,c]
-        #     = A[b,d] * W[c,d] * masks_drop_all[d,m,d]^2
+        #     = sum_k A[b,k] * W[c,k] * masks_keep_all[d,m,k]
         #
-        # Computing only these diagonal mask entries preserves the paper's
-        # behavior without constructing the large expanded tensors.
-        coordinate_products = (
-            A.unsqueeze(1) * W.unsqueeze(0)
-        ).permute(0, 2, 1).unsqueeze(2)                                  # (B, D, 1, C)
+        # The paired drop mask contains the same sampled values at every
+        # coordinate k != d, while coordinate d is forced from one to zero.
+        #
+        # Z[b,c,k] stores the contribution of coordinate k to class c.
+        Z = A.unsqueeze(1) * W.unsqueeze(0)                             # (B, C, D)
 
-        diagonal_indices = torch.arange(D, device=A.device)
-        keep_diagonal = masks_keep_all[
-            diagonal_indices, :, diagonal_indices
-        ]                                                               # (D, M)
-        drop_diagonal = masks_drop_all[
-            diagonal_indices, :, diagonal_indices
-        ]                                                               # (D, M)
+        # Binary masks satisfy mask^2 == mask. Flatten the candidate-coordinate
+        # and Monte Carlo axes so one matrix multiplication evaluates every
+        # complete masked logit without constructing the historical expanded
+        # B x D x M x D and C x D x M x D tensors.
+        masks_keep_flat = masks_keep_all.reshape(D * M, D)              # (D*M, D)
+        logits_keep = (
+            Z.reshape(B * C, D) @ masks_keep_flat.T
+        ).view(B, C, D, M).permute(0, 2, 3, 1)                          # (B, D, M, C)
 
-        logits_keep = coordinate_products * keep_diagonal.square().unsqueeze(0).unsqueeze(-1)
-        logits_drop = coordinate_products * drop_diagonal.square().unsqueeze(0).unsqueeze(-1)
+        # The paired drop mask differs only at coordinate d. Therefore,
+        # subtracting A[b,d] * W[c,d] from the keep logit is exactly equivalent
+        # to evaluating the complete paired drop mask with a second matrix
+        # multiplication.
+        tested_coordinate_contribution = (
+            Z.permute(0, 2, 1).unsqueeze(2)
+        )                                                               # (B, D, 1, C)
+        logits_drop = logits_keep - tested_coordinate_contribution      # (B, D, M, C)
+
+        if debug_checks:
+            diagonal_indices = torch.arange(D, device=A.device)
+            keep_diagonal = masks_keep_all[
+                diagonal_indices, :, diagonal_indices
+            ]
+            drop_diagonal = masks_drop_all[
+                diagonal_indices, :, diagonal_indices
+            ]
+
+            assert torch.all(keep_diagonal == 1.0), (
+                "Each keep mask must force its tested coordinate to one."
+            )
+            assert torch.all(drop_diagonal == 0.0), (
+                "Each drop mask must force its tested coordinate to zero."
+            )
+
+            mask_difference = masks_keep_all - masks_drop_all
+            expected_difference = torch.zeros_like(mask_difference)
+            expected_difference[
+                diagonal_indices, :, diagonal_indices
+            ] = 1.0
+            assert torch.equal(mask_difference, expected_difference), (
+                "Paired keep/drop masks must be identical outside the "
+                "tested coordinate."
+            )
 
         targets_flat = targets.view(B, 1, 1).expand(-1, D, M).reshape(-1)
 
-        loss_keep = -F.cross_entropy(logits_keep.reshape(-1, C), targets_flat, reduction='none').view(B, D, M)
-        loss_drop = -F.cross_entropy(logits_drop.reshape(-1, C), targets_flat, reduction='none').view(B, D, M)
+        loss_keep = -F.cross_entropy(
+            logits_keep.reshape(-1, C),
+            targets_flat,
+            reduction='none',
+        ).view(B, D, M)
+        loss_drop = -F.cross_entropy(
+            logits_drop.reshape(-1, C),
+            targets_flat,
+            reduction='none',
+        ).view(B, D, M)
 
-        delta = (loss_keep - loss_drop).mean(dim=0).mean(dim=1)  # (D,)
+        # Average the paired keep-versus-drop effect across the batch and the
+        # sampled configurations of every other mask coordinate.
+        delta = (loss_keep - loss_drop).mean(dim=0).mean(dim=1)         # (D,)
+
         loss_diff = delta.unsqueeze(0).expand(C, D)
 
         delta_term = np.log(dropconnect_delta / (1 - dropconnect_delta))
